@@ -6,7 +6,7 @@ The specification for a multi-backend interface for Federated inference over rel
 ## Functional Requirements
 * The inference and decision making tasks are performed localy on a clinet side.
 * Clients exchange model inference results in terms of parameters of a posterior distributions over model parameters.
-* Prior and posterior distributions are specified in the terms of natural parameters of an exponential family
+* Prior and posterior distributions are specified in the terms of natural parameters of an [exponential family](distributions.md).
 * An interface for nodes to join, leave and interact with the federated network is specified in [interface](interface.md) doc.
 
 ## Non-functional Requirements
