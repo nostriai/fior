@@ -10,7 +10,7 @@ There is no aggregator. Every participant computes its own view of the global po
 
 The protocol recognises exactly two roles.
 
-**FIOR relay.** A NIP-01 relay that accepts the FIOR kind block, advertises support in its NIP-11 document, and enforces size and rate policy. It MAY reject structurally malformed events — wrong tag arity, invalid base64, declared size mismatch. It MUST NOT compute, weight, combine, or otherwise alter parameters. A relay is storage and transport.
+**FIOR relay.** A NIP-01 relay that accepts the FIOR kind block, advertises support in its NIP-11 document, and enforces size and rate policy. It MAY reject structurally malformed events — wrong tag arity, malformed hex, `d` values that do not parse. It MUST NOT compute, weight, combine, or otherwise alter parameters. A relay is storage and transport, and it never holds parameters at all: η payloads live in Blossom blobs and events carry only their hashes.
 
 **FIOR client.** Everything else: fetching model cards and ONNX graphs, running local inference, maintaining a private trust table, building its own prior, publishing contributions, and optionally publishing combinations, benchmarks, and trust attestations.
 
@@ -120,13 +120,21 @@ Defines a model. The `d` tag carries the model identifier.
 | `onnx`    | yes      | ONNX blob reference                                      |
 | `dist`    | yes*     | Distribution assignment for an ONNX initializer tensor   |
 | `group`   | yes*     | Named group of initializers sharing a distribution       |
-| `eta`     | no       | Base prior `η₀` per group (inline mode)                  |
-| `x`       | no       | Base prior `η₀` blob reference (blob mode)               |
+| `x`       | no       | Base prior `η₀` blob reference                           |
+| `blossom` | no       | Model-wide Blossom server hints                          |
 | `ttl`     | no       | Seconds after which a site without its own `expiration` is considered stale |
 
 `*` At least one `dist` or `group` tag.
 
-If no `eta`/`x` is present, `η₀` is the zero vector. Publishing an explicit proper base prior is RECOMMENDED — a zero vector means `σ² = ∞`, and every node then has to regularise privately in a way no other node can see or reproduce.
+If no `x` is present, `η₀` is the zero vector. Publishing an explicit proper base prior is RECOMMENDED — a zero vector means `σ² = ∞`, and every node then has to regularise privately in a way no other node can see or reproduce.
+
+### `blossom` Tag Format
+
+```
+["blossom", "<server-root>", ...]
+```
+
+Model-wide fallback servers, tried when a blob's own per-event hints fail. Publishing at least one is RECOMMENDED: per-event hints go stale as servers come and go, and this list is replaceable by the model creator.
 
 ### `onnx` Tag Format
 
@@ -157,7 +165,7 @@ Groups multiple initializer tensors under a shared distribution, reducing wire o
 
 A special group name `*` means "all initializers not otherwise assigned, with this family."
 
-**Group order is significant.** In blob mode, groups are concatenated in the order their `group`/`dist` tags appear in the model card. Reordering or adding groups therefore requires a `version` increment, and sites carry the version they were built against.
+**Group order is significant.** Every η blob concatenates its groups in the order their `group`/`dist` tags appear in the model card. Reordering or adding groups therefore requires a `version` increment, and sites carry the version they were built against.
 
 ### Content
 
@@ -176,8 +184,8 @@ Optional JSON with extended metadata.
     ["onnx", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "48192", "https://blossom.example"],
     ["group", "fc-layers", "normal", "fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"],
     ["group", "convs", "normal", "conv1.weight", "conv1.bias", "conv2.weight", "conv2.bias"],
-    ["eta", "fc-layers", "f64le.b64", "AAAAAAAA8L8AAAAAAADwvw=="],
-    ["eta", "convs", "f64le.b64", "AAAAAAAA8L8AAAAAAADwvw=="],
+    ["x", "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b", "f64le", "196608", "https://blossom.example"],
+    ["blossom", "https://blossom.example", "https://blossom.mirror.example"],
     ["ttl", "2592000"]
   ],
   "content": "{\"framework\":\"pyro\",\"onnx_opset\":18,\"min_samples\":500,\"license\":\"MIT\"}"
@@ -198,11 +206,8 @@ A node's likelihood approximation `Δη`. One per `(author, model)`; the latest 
 | `a`          | yes      | Model card coordinate, marker `model`                              |
 | `v`          | yes      | Model card version this site was built against                     |
 | `a`          | no       | Composite used as cavity, marker `cavity`; absent means `η₀` alone  |
-| `eta`        | yes*     | `Δη` per group (inline mode)                                       |
-| `x`          | yes*     | `Δη` blob reference (blob mode)                                    |
+| `x`          | yes      | `Δη` blob reference                                                |
 | `expiration` | no       | NIP-40 expiration; RECOMMENDED                                     |
-
-`*` Exactly one of `eta` (one or more) or `x`.
 
 ```
 ["a", "30100:<creator-hex>:<model-id>", "<relay-hint>", "model"]
@@ -236,8 +241,7 @@ JSON with local training metadata. All fields optional and advisory — none of 
     ["a", "30100:c0ffee...:pump-failure-v1", "", "model"],
     ["v", "3"],
     ["a", "30102:deadbeef...:pump-failure-v1-tw-0811", "", "cavity"],
-    ["eta", "fc-layers", "i8.b64", "f4mHhIB7dnFsZ2I=", "3.05e-4", "1.12e-2"],
-    ["eta", "convs", "i8.b64", "AQIDBAUGBwgJCgsM", "8.81e-5", "4.30e-3"],
+    ["x", "7d3f21a0c48b5e6f9012345678abcdef0123456789abcdef0123456789abcdef", "i8", "24576", "https://blossom.example"],
     ["expiration", "1786752000"]
   ],
   "content": "{\"samples\":8234,\"free_energy\":-1247.3}"
@@ -271,8 +275,7 @@ A Composite carries no data-dependent likelihood term. It MUST NOT be summed as 
 | `p`       | yes*     | Member pubkey, one per member (indexed, enables reverse lookup) |
 | `rho`     | yes      | Damping factor actually applied                                 |
 | `purpose` | no       | `trust-weighted`, `uniform`, `ablation`, or free text           |
-| `eta`     | yes*     | Resulting `η` per group (inline mode)                           |
-| `x`       | yes*     | Resulting `η` blob reference (blob mode)                        |
+| `x`       | yes      | Resulting `η` blob reference                                    |
 
 ### `m` Tag Format
 
@@ -311,7 +314,7 @@ An ablation probing what happens without member C:
     ["p", "ccc3..."],
     ["rho", "1.0"],
     ["purpose", "ablation"],
-    ["x", "5f3a...", "f64le.b64", "196608", "https://blossom.example"]
+    ["x", "5f3a...", "f64le", "196608", "https://blossom.example"]
   ],
   "content": "{\"note\":\"leave-one-out probe for member C\"}"
 }
@@ -430,23 +433,42 @@ A `private` descriptor still makes results comparable *within one publisher's* s
 
 ## Natural Parameter Encoding
 
-### Encoding token
+**All η payloads are Blossom blobs.** There is no inline form. Events carry a SHA-256 and never the parameters themselves.
+
+This is not only about event size. An inline payload cannot be declined: subscribing to a model would push every member's full parameter vector at you whether or not you intend to use it. With blobs, the event is a cheap descriptor and a client fetches only what its `(a, b)` prior says is worth the bandwidth — which is the selective behaviour the trust layer is built around. It also keeps relays doing what they are good at, small events and broad fanout, rather than re-serving megabytes of float data on every subscription.
+
+The event signature covers the SHA-256, which commits to the bytes exactly as strongly as signing them inline.
+
+### Blob reference
 
 ```
-["eta", "<group>", "<enc>", "<payload>", "<scale₁>", "<scale₂>", ...]
+["x", "<sha256-hex>", "<enc>", "<bytes>", "<server-root>", ...]
 ```
 
-`<enc>` is `<dtype><endian>.<transport>`:
+Fetch from `<server-root>/<sha256-hex>` per Blossom BUD-01. Server roots are hints, tried in order, then the model card's `blossom` list. Clients MUST verify the hash before use.
 
-| Token       | Bytes/value | Notes                                        |
-|-------------|-------------|----------------------------------------------|
-| `f64le.b64` | 8           | Default                                      |
-| `f32le.b64` | 4           | Opt-in per group                             |
-| `i16.b64`   | 2           | Requires scales                              |
-| `i8.b64`    | 1           | Requires scales                              |
-| `f64le.hex` | 8           | Legacy/debugging; 2× the size of base64      |
+Because blobs are raw binary rather than JSON strings, there is no transport encoding to specify — `<enc>` is just the numeric type:
 
-Base64 is standard-alphabet with padding. It is 4/3 expansion against hex's 2×, so `f64le.b64` is 33% smaller than v2's hex for no loss.
+| Token   | Bytes/value | Notes                      |
+|---------|-------------|----------------------------|
+| `f64le` | 8           | Default                    |
+| `f32le` | 4           | Opt-in                     |
+| `i16le` | 2           | Requires scales            |
+| `i8`    | 1           | Requires scales            |
+
+Raw binary is half the size of v2's hex encoding and 25% smaller than base64 would be.
+
+### Blob layout
+
+```
+header   u16le  group_count
+         per group, in model card order:
+           u8     scale_count      (0 for float encodings)
+           f64le  scale × scale_count
+body     groups concatenated in model card order
+```
+
+Each group's value count derives from its ONNX initializer shapes times its family's value multiplier, so no lengths are transmitted. `group_count` MUST match the model card at the version the event declares, which makes a stale or reordered model card fail loudly rather than silently misparse.
 
 ### Natural parameter layout per family
 
@@ -464,7 +486,7 @@ For a site, these are *differences* `Δη`, not posteriors.
 
 ### Quantization
 
-Integer encodings carry one scale per natural-parameter index of the family — two for `normal`, `gamma`, and `beta`; one for `dirichlet` and `cat`. The count is implied by the family in the model card, so the tag is self-describing. Dequantization is `value = scale × q`.
+Integer encodings carry one scale per natural-parameter index of the family — two for `normal`, `gamma`, and `beta`; one for `dirichlet` and `cat`. Dequantization is `value = scale × q`.
 
 Per-index scaling is required, not cosmetic: `η₂ = −1/(2σ²)` spans orders of magnitude between a sharply determined parameter and a barely identified one, and a single global scale cannot cover both natural-parameter indices at once.
 
@@ -477,21 +499,15 @@ Two consequences worth stating plainly:
 
 Wire precision and compute precision are separate concerns: `ΔF` is a difference of differences of `A(η)` and is prone to catastrophic cancellation, so clients MUST dequantize to f64 and evaluate `A()` in f64 regardless of how a site arrived.
 
-### Inline and blob modes
+### Publishing order and availability
 
-`f64le` Normal posteriors cost 16 bytes per parameter, ≈21.3 characters base64. Against a conservative 32 KiB event budget that is roughly **1,500 parameters inline** at f64, or **12,000 at i8**. Real models exceed both, so blob mode is the normal path, not an exception.
+**Publishers MUST upload the blob before publishing the event that references it.** A Nostr event is durable and signed the moment a relay accepts it; its blob is not, so publishing in the other order creates a signed reference to bytes nobody serves.
 
-**Inline mode** — one `eta` tag per group.
+Publishers SHOULD mirror to more than one server and list each as a hint. Model creators SHOULD maintain the model card's `blossom` list as a fallback, since per-event hints go stale as servers come and go while the model card is replaceable.
 
-**Blob mode** — one `x` tag:
+**An unresolvable blob is not an error state.** A client that cannot fetch a member's blob treats that member as absent and composes without them. This needs no special handling: it is the same outcome as declining to fetch a member whose `(a, b)` prior did not justify the bandwidth, and the member returns to the composition as soon as its bytes are retrievable.
 
-```
-["x", "<sha256-hex>", "<enc>", "<bytes>", "<server-root>", ...]
-```
-
-The blob holds every group concatenated in model card order. Group boundaries derive from the ONNX initializer shapes and the family's value count, so nothing extra is transmitted. Integer encodings put their scales in a header: `<u16 group count>` followed by, per group, `<u8 scale count><f64le scales...>`.
-
-Presence of `x` selects blob mode. The two modes MUST NOT be mixed within one event. Clients MUST verify the blob SHA-256 on fetch.
+Relays store references, not payloads, so a relay's size limits bound tag count and metadata only. Blob size is a matter between publisher and Blossom server.
 
 ---
 
@@ -660,7 +676,6 @@ A FIOR relay advertises support in its NIP-11 document. This is the entire mecha
     "version": "3",
     "kinds": [30100, 30101, 30102, 30103, 30104, 30105],
     "models": ["pump-failure-v1"],
-    "max_eta_bytes": 65536,
     "validates": ["structure"],
     "blossom": ["https://blossom.example"]
   }
@@ -672,7 +687,7 @@ A FIOR relay advertises support in its NIP-11 document. This is the entire mecha
 ### Validation split
 
 - **Clients MUST** verify decoded vector lengths against group dimensions derived from ONNX initializer shapes times the family's value count; verify blob SHA-256 on fetch; verify the model card `version` of every site they compose.
-- **Relays MAY** perform cheap structural checks only: tag arity, base64 validity, declared size agreement, `d` well-formedness. A relay cannot be expected to parse ONNX, and per the roles above it must never touch the numbers.
+- **Relays MAY** perform cheap structural checks only: tag arity, SHA-256 hex well-formedness, `d` well-formedness, known `enc` token. A relay cannot be expected to parse ONNX or fetch blobs, and per the roles above it must never touch the numbers.
 
 ---
 
@@ -701,14 +716,16 @@ NIP-01 filters OR within a key and cannot AND across keys, so "benchmarks of com
 ```
 1. Creator exports the model to ONNX, uploads it to a Blossom server
 2. Creator publishes a Model Card (30100) with the blob hash, group map, and η₀
-3. A node fetches the model card and ONNX graph
-4. The node composes its prior: η₀ + ρ Σ β Δη over whichever peers it chooses
+3. A node fetches the model card, the ONNX graph, and the η₀ blob
+4. The node fetches the Δη blobs of whichever peers it judges worth the
+   bandwidth, and composes its prior: η₀ + ρ Σ β Δη
    (first round: no peers, so the prior is η₀)
 5. The node trains locally on private data
-6. The node publishes its site (30101), pinning the cavity it trained against
+6. The node uploads its Δη blob, then publishes its site (30101) referencing
+   that blob and pinning the cavity it trained against
 7. Each client independently recomputes ΔF per peer per group via BMR,
    updates β, and recomposes its prior
-8. Repeat from step 5
+8. Repeat from step 4
 ```
 
 Steps 4 and 7 happen independently on every client. Nothing in this loop requires any participant to wait on any other.
@@ -730,7 +747,8 @@ D. Any node publishes Trust Attestations (30104)
 
 - All events are Nostr-signed by the publishing keypair.
 - Clients verify site vector lengths against ONNX initializer shapes from the model card, and reject on mismatch.
-- Clients verify blob integrity by SHA-256 before use.
+- Clients verify blob integrity by SHA-256 before use. A Blossom server is therefore untrusted infrastructure: it can withhold bytes but cannot substitute them.
+- Blob availability is a liveness concern, not a safety one. A withheld or lost blob makes a member absent from a composition — the same outcome as a low β — and never produces a wrong result.
 - Clients verify a site's model card `version` before composing it.
 - No participant is obliged to accept any other participant's parameters. β is local, and `β → 0` costs nothing to apply.
 - Poisoned parameters are suppressed by the same mechanism that weights honest ones: a site that lowers the evaluator's log evidence gets `ΔF < 0` and a β below the prior mean, in the round it is published.
@@ -762,14 +780,14 @@ D. Any node publishes Trust Attestations (30104)
 |---------------------------------|--------------------------|------------------------------------------------------------------------|
 | 30102 treated as an accumulating list | one site per (author, model), latest wins | 30000–39999 is addressable; a conformant relay drops the others |
 | 30105 declared non-replaceable  | n/a                      | Same — the kind range makes that impossible                            |
-| `["η", ...]`                    | `["eta", ...]`           | Non-ASCII tag key is a cross-implementation hazard and was never indexable |
+| `["η", ...]`                    | removed                  | Payload moved to blobs; the non-ASCII tag key was also a cross-implementation hazard and was never indexable |
 | `["p", "<event-id>"]`           | `["a", ...]` / `["e", ...]` | `p` is a pubkey reference in NIP-01 and relays index it as one       |
 | `["post", "<event-id>"]`        | `["e", ...]` + `["a", ...]` | Multi-letter tags are not indexed, so evaluations were unqueryable  |
 | `["agg", "npub1..."]`           | removed                  | Tags carry 32-byte hex; npub is NIP-19 display encoding                |
 | `["onnx", "<nostr event id>"]`  | `["onnx", "<sha256>", ...]` | Blossom addresses blobs by SHA-256, not event id                    |
 | "NIP-33"                        | NIP-01                   | NIP-33 was merged into NIP-01                                          |
-| hex-only `η` encoding           | base64 default, f32/i16/i8 available | 33% smaller at no loss; up to 8× with quantization         |
-| unbounded event size            | inline/blob modes with an explicit threshold | Typical relay caps are 64–256 KiB          |
+| `η` hex-encoded in event tags   | `η` always a Blossom blob; events carry only the SHA-256 | Typical relay caps are 64–256 KiB, which a real model exceeds immediately; and an inline payload cannot be declined by a subscriber |
+| hex-only encoding               | raw binary, `f32le`/`i16le`/`i8` available | Half the size of hex at no loss; up to 8× with quantization |
 
 ### Trust layer
 
