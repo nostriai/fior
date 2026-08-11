@@ -2,143 +2,116 @@
 
 ## Brief
 
-**FIOR (Federated Inference Over Relays)** is a Nostr protocol for collaborative machine learning without sharing raw data. Multiple parties train the same model on their own private data and exchange only the statistical parameters that describe what each party learned. An aggregator combines these into a single model that is better than any party could train alone.
+**FIOR (Federated Inference Over Relays)** is a Nostr protocol for collaborative machine learning without sharing raw data. Multiple parties train the same model on their own private data and exchange only the statistical parameters describing what each learned. Every party then combines those contributions locally, weighting each peer by how much that peer measurably improves its own inference.
 
-### The Moving Parts
+There is no aggregator. Nothing in the protocol requires a participant to wait on, or trust the state of, any other participant.
 
-| Part | Language | Repo | Status |
-|------|----------|------|--------|
-| Protocol spec | Markdown | `fior/protocol.md` | Done |
-| UI integration guide | Markdown | `fior/ui-integration.md` | Done |
-| Test data generator | Python | `forum/testmodel/` | Done |
-| Protocol handler | Go | `forum/fiorgo/` | Done |
-| Docker e2e stack | YAML/Dockerfile | `forum/` | Done |
-| Aggregator service | Go | TBD | Not started |
+### Repository Layout
+
+| Part | Language | Location | Status |
+|------|----------|----------|--------|
+| Protocol spec | Markdown | `fior/protocol.md` | v3, done |
+| Client interface | Markdown | `fior/interface.md` | v3, done |
+| UI integration guide | Markdown | `fior/ui-integration.md` | v3, done |
+| Distribution reference | Markdown | `fior/distributions.md` | Done |
+| Test data generator | Python | `forum/testmodel/` | Done, implements v2 |
+| Protocol handler | Go | `forum/fiorgo/` | Done, implements v2 |
+| Docker e2e stack | YAML/Dockerfile | `forum/` | Done, implements v2 |
 | Marketplace UI | React | `forum/src/` | Not started |
-| Trust/reputation layer | Go/Python | TBD | Not started |
+| Trust engine (BMR) | Go/Python | TBD | Not started |
+| Blossom integration | Go | TBD | Not started |
+
+The Go and Python components live on the `feat/test-model` branch of the `forum` repository, not on its `main`.
+
+**The implementation currently targets v2.** It predates the removal of the aggregator, the switch from posteriors to site contributions, and the move of parameters into Blossom blobs. Section 6 enumerates the migration.
 
 ### How It Works
 
-1. A model creator exports their model definition in ONNX format, uploads it to a Blossom server, and publishes a **Model Card** (Nostr kind 30100) referencing the ONNX file.
+1. A model creator exports the model definition to ONNX, uploads it to a Blossom server, and publishes a **Model Card** (kind 30100) carrying the blob hash, the map from ONNX initializer tensors to exponential family distributions, and the base prior `η₀`.
 
-2. An aggregator publishes an initial **Prior** (30101) -- a vector of zeros meaning "no information yet."
+2. A node fetches the model card, the ONNX graph, and `η₀`.
 
-3. Nodes join the federation (30103), download the prior, and train the model on their own local data. Their raw data never leaves their machine. Training produces a **Posterior** -- updated distribution parameters describing what the model learned from the local data.
+3. The node fetches the site contributions of whichever peers it judges worth the bandwidth, and **composes its own prior**:
 
-4. Nodes publish their posterior as a **Posterior Submit** (30102). The parameters are encoded as float64 natural parameters (exponential family form), hex-encoded in Nostr event tags.
+   ```
+   η_A^prior = η₀ + ρ · Σ_{n ≠ A} β_{A→n} · Δη_n
+   ```
 
-5. The aggregator collects posteriors, validates them, and **aggregates** by summing the natural parameter differences. This is mathematically sound because the exponential family is closed under addition.
+   On the first round there are no peers and the prior is just `η₀`.
 
-6. The aggregator publishes an updated **Prior** (30101) with the combined result. All nodes download it and repeat.
+4. The node trains on its own local data. Raw data never leaves the machine. Training produces a posterior; subtracting the prior it trained against yields the node's **site contribution** `Δη` — its likelihood approximation, and the quantity that composes.
 
-7. Nodes can back-test other nodes' posteriors against their own holdout data and publish **Trust Evaluations** (30104) -- per-parameter-group scores showing whether the contribution improved or degraded predictions. The aggregator publishes **Trust Snapshots** (30105) summarizing these evaluations for the marketplace UI.
+5. The node uploads `Δη` as a Blossom blob, then publishes a **Site Contribution** (30101) referencing that blob and pinning the cavity it trained against. Publishing the site *is* joining; there is no registration step.
 
-### To Be Done
+6. Each client independently scores every peer via **Bayesian model reduction**, a closed-form evaluation of how the local log evidence changes if that peer is removed. This sets `β` per peer per parameter group, and the client recomposes its prior.
 
-- **Persistent aggregator**: the current e2e test runs once; need a daemon that continuously watches for posteriors and publishes priors on a schedule.
-- **Marketplace UI**: wire the existing React/NDK forum app to the FIOR event kinds per the UI integration guide.
-- **Trust layer (stage 2)**: evaluator reputation tracking, consensus-weighted aggregation to route around poisoned parameters.
-- **Production model support**: the test model uses a simple Bayesian linear regression with closed-form posteriors. Production models need Pyro/Numpyro integration for arbitrary ONNX models with VI training.
-- **Blossom integration**: the protocol spec references ONNX files via Blossom blobs; this needs wiring into the aggregator and marketplace.
+7. Repeat from step 3. Steps 3 and 6 happen independently on every client.
 
----
+In parallel and entirely optionally, any node may publish a **Composite** (30102) recording a specific weighted combination, a **Benchmark Descriptor** (30105) defining a comparable evaluation, **Benchmark Results** (30103) measuring sites or composites, and **Trust Attestations** (30104) sharing its Beta parameters for a peer.
 
-## 1. Protocol Layer -- `fior/protocol.md`
+### Why It Works
 
-Defines six Nostr event kinds for the FIOR protocol. All events are standard Nostr JSON, signed with BIP-340 Schnorr signatures, transmitted over WebSocket to Nostr relays.
+Aggregation is addition. The exponential family is closed under addition of natural parameters, and Nostr's addressable event semantics store exactly one event per `(kind, pubkey, d)`. Keying sites by `(author, model)` therefore gives "the latest site replaces the previous one" for free — precisely the expectation-propagation invariant that makes summing latest-per-author double-count nothing.
 
-### Event Kinds
-
-#### 30100 -- Model Card (Replaceable, NIP-33)
-
-Defines a model's structure. Instead of inventing a custom schema, FIOR references an ONNX file (the industry standard ML interchange format). The model card maps ONNX initializer tensors to exponential family distributions and groups related parameters.
-
-```
-Tags: d, title, summary, version, agg, onnx, onnxhash, dist, group
-```
-
-The `d` tag carries the model identifier (slug). The `onnx` tag is a Nostr event ID pointing to the Blossom upload of the `.onnx` file. `dist` and `group` tags assign exponential family distributions to ONNX initializer tensors.
-
-#### 30101 -- Prior Broadcast
-
-Published by the aggregator. Each publication supersedes the previous for the same model. Carries the global natural parameter vector per group, hex-encoded as LE float64.
-
-```
-Tags: d, round, p, η
-```
-
-The initial prior is all zeros (`η = [0] * len(group)`) representing infinite variance -- "no information yet."
-
-#### 30102 -- Posterior Submit
-
-Published by a node after local training. References which prior the training started from (`p` tag). Carries the local posterior natural parameters per group.
-
-```
-Tags: d, p, η
-```
-
-The aggregator computes `η_diff = η_local - η_prior_ref` and adds it to the global sum.
-
-#### 30103 -- Node Registration
-
-Announces joining or leaving a model's federation.
-
-```
-Tags: d, action
-```
-
-#### 30104 -- Trust Evaluation
-
-Published by a node that back-tested another node's posterior on their own holdout data. Carries per-group scores with variance.
-
-```
-Tags: d, post, group, metric, samples
-Group tag: ["group", "<name>", "<score>", "<variance>"]
-```
-
-Score > 0 means the contribution improved predictions; score < 0 means it degraded them. Variance quantifies how consistent the improvement was across the holdout set.
-
-#### 30105 -- Trust Snapshot
-
-Published by the aggregator. Summarizes all 30104 evaluations for a specific posterior into per-group consensus scores. This gives the marketplace UI a fast lookup without replaying the full evaluation chain.
-
-```
-Group tag: ["group", "<name>", "<mean_score>", "<std_score>", "<evaluator_count>"]
-```
-
-### Natural Parameter Encoding
-
-Parameters are exchanged in the exponential family's natural parameter form. For a group with distribution `normal` and `d` scalar parameters:
-
-```
-η₁_i = μ_i / σ²_i       (mean natural parameter)
-η₂_i = -1 / (2 * σ²_i)   (precision natural parameter)
-```
-
-Total: `2d` float64 values, LE binary, hex-encoded in the `η` tag.
-
-Aggregation is addition: `η_global += η_diff`. This works because the exponential family is closed under addition of natural parameters. No complex merging algorithm needed.
-
-### Aggregation (Stage 1)
-
-Simple unweighted sum. For each posterior:
-
-```
-η_diff = η_posterior - η_prior_ref
-η_global += η_diff
-```
-
-Stage 2 will add consensus-weighted aggregation using trust evaluation data to suppress poisoned contributions.
+That is the whole reason no coordinator is needed: the relay's replacement rule *is* the consistency mechanism.
 
 ---
 
-## 2. Test Model -- `forum/testmodel/` (Python)
+## 1. Protocol Layer — `fior/protocol.md`
 
-A deterministic, verifiable test harness for the FIOR protocol. Provides everything needed to validate the full protocol flow end-to-end without requiring real ML infrastructure.
+Six addressable Nostr event kinds. All events are standard Nostr JSON signed with BIP-340 Schnorr signatures over WebSocket.
+
+| Kind  | Name                 | `d`                                | Purpose                                  |
+|-------|----------------------|------------------------------------|------------------------------------------|
+| 30100 | Model Card           | `<model-id>`                       | ONNX blob, distribution map, `η₀`        |
+| 30101 | Site Contribution    | `<model-id>`                       | A node's `Δη`                            |
+| 30102 | Composite            | `<composite-id>`                   | A reproducible weighted combination      |
+| 30103 | Benchmark Result     | `<bench-id>:<target-event-id>`     | A measurement                            |
+| 30104 | Trust Attestation    | `<target-hex>[:<model>[:<group>]]` | Beta parameters for β                    |
+| 30105 | Benchmark Descriptor | `<bench-id>`                       | What a benchmark measures                |
+
+### Natural Parameters
+
+Parameters are exchanged in exponential family natural parameter form. For a group with `d` scalar parameters under `normal`:
+
+```
+η₁ᵢ = μᵢ / σ²ᵢ        (mean natural parameter)
+η₂ᵢ = −1 / (2σ²ᵢ)      (precision natural parameter)
+```
+
+Sites carry *differences* `Δη`, not posteriors.
+
+**All η payloads are Blossom blobs.** Events carry a SHA-256 and never the parameters themselves. Beyond event size limits, the reason is that an inline payload cannot be declined: a subscriber would receive every member's full parameter vector regardless of intent, defeating the selective fetch the trust layer depends on. Encodings are raw binary — `f64le`, `f32le`, `i16le`, `i8` — with per-index scales in a blob header for the integer forms, and mandatory stochastic rounding so that quantization error stays unbiased and cancels across members rather than accumulating.
+
+### Trust
+
+Peer inclusion is a Bernoulli indicator with a Beta prior:
+
+```
+β_{n,g} = 1 / (1 + (b/a)·exp(−ΔF_{n,g}))
+```
+
+`ΔF` is the log Bayes factor from Bayesian model reduction, in closed form over the log-partition function `A(η)`:
+
+```
+ΔF = A(η_q) + A(η_p − βΔη) − A(η_q − βΔη) − A(η_p)
+```
+
+`A(η)` is tabulated per family in `distributions.md`, so this needs no new mathematics and costs two extra evaluations per peer per group — no holdout split, no retraining, no second pass over data.
+
+`ΔF` is recomputed every round and never stored: sites are replaceable, so evidence about a superseded site describes something that no longer exists. Only `(a, b)` accumulates, and only from attestations — information a client cannot recompute for itself. With no attestations, `(a, b) = (1, 1)` and `β = σ(ΔF)`.
+
+There is no global trust score. Each client's β table is derived from its own data, and two honest clients with different data will legitimately assign different β to the same peer.
+
+---
+
+## 2. Test Model — `forum/testmodel/` (Python)
+
+A deterministic, verifiable harness for the protocol flow, requiring no real ML infrastructure. **Implements v2.**
 
 ### Data Generator (`generator.py`)
 
-Generates synthetic time series data for a 4-feature input model:
+Synthetic time series for a 4-feature model:
 
 | Feature | Pattern | Represents |
 |---------|---------|------------|
@@ -147,173 +120,161 @@ Generates synthetic time series data for a 4-feature input model:
 | x3 | Square wave | Discrete state changes |
 | x4 | Smoothed random walk | Cumulative stochastic process |
 
-The ground truth is known: `y = 0.5*x1 - 0.3*x2 + 1.2*x3 - 0.8*x4 + 0.1 + noise`.
+Ground truth is known: `y = 0.5·x1 − 0.3·x2 + 1.2·x3 − 0.8·x4 + 0.1 + noise`.
 
-Each simulated "node" receives a variant dataset. A node seed determines the exact noise pattern. Same seed always produces the same dataset (deterministic PRNG). Feature noise simulates sensor imprecision. The generator also supports label flip probability for simulating misclassified data.
+Each simulated node receives a variant dataset determined by a node seed; the same seed always produces the same data. Feature noise simulates sensor imprecision, and a label flip probability simulates misclassification.
 
 ### Bayesian Linear Regression (`model.py`)
 
-Mean-field variational inference with per-parameter independent Normal posteriors. Prior: each parameter `~ Normal(0, 10²)`. Known observation noise `σ² = 0.01`. Coordinate ascent VI updates each parameter's posterior mean and variance independently.
+Mean-field variational inference with per-parameter independent Normal posteriors. Prior `Normal(0, 10²)`, known observation noise `σ² = 0.01`. Coordinate ascent VI updates each parameter's posterior mean and variance independently.
 
-Key methods:
-- `fit(X, y)` -- run VI on local data
-- `natural_parameters()` -- encode posterior as `[η₁..., η₂...]` float64 vector
-- `load_natural_parameters(eta)` -- decode natural parameters back to mean/variance
-- `prior_natural_parameters()` -- get the prior's natural parameters
+- `fit(X, y)` — run VI on local data
+- `natural_parameters()` — encode posterior as `[η₁…, η₂…]`
+- `load_natural_parameters(eta)` — decode back to mean/variance
+- `prior_natural_parameters()` — the prior's natural parameters
+
+Note the prior is `Normal(0, 10²)`, whose `η₂ = −0.005`. Under v2's zero-vector base prior this regularisation was private and invisible to other nodes; under v3 it belongs in the model card's `η₀`.
 
 ### Protocol Operations (`protocol.py`)
 
-- `encode_hex(eta)` / `decode_hex(data)` -- float64 LE binary ↔ hex string
-- `prior_diff(posterior_eta, prior_eta)` -- compute η difference
-- `aggregate(global_eta, diffs)` -- sum diffs into global
-- `simulate_federation(n_nodes, ...)` -- run full simulated round
+- `encode_hex(eta)` / `decode_hex(data)` — float64 LE ↔ hex
+- `prior_diff(posterior_eta, prior_eta)` — natural parameter difference
+- `aggregate(global_eta, diffs)` — sum diffs
+- `simulate_federation(n_nodes, …)` — run a full simulated round
 
 ### CLI (`__main__.py`)
 
-Called by the Go binary via subprocess. Usage:
+Invoked by the Go binary as a subprocess:
 
 ```
 python -m testmodel --seed 42 --samples 2000 --node 1 --iters 30
 ```
 
-Outputs JSON with `natural_eta` (hex), `post_mean`, `true_parameters`, etc.
+Emits JSON with `natural_eta` (hex), `post_mean`, `true_parameters`.
 
 ### Tests (`test_protocol.py`)
 
-12 tests, all passing. Covers:
-- Deterministic generation (same seed = same data)
-- Single-node parameter recovery
-- Natural parameter round-trip (encode/decode preserves float64)
-- Hex encoding round-trip
-- Zero diff when no training
-- Nonzero diff with training data
-- Aggregation correctness (sum of diffs)
-- Federation convergence (MAE < 0.15 vs ground truth)
-- More nodes beats the zero-prior baseline
-- More data produces tighter posteriors (lower variance)
+12 tests, all passing: deterministic generation, single-node recovery, natural parameter and hex round-trips, zero diff without training, nonzero diff with data, aggregation correctness, federation convergence (MAE < 0.15 against ground truth), more nodes beating the zero-prior baseline, and more data producing tighter posteriors.
 
 ---
 
-## 3. Protocol Handler -- `forum/fiorgo/` (Go)
+## 3. Protocol Handler — `forum/fiorgo/` (Go)
 
-A Go module using the orly Nostr library (`git.smesh.lol/orly` v0.65.60) for event construction, signing, and relay communication.
+A Go module using the orly Nostr library (`git.smesh.lol/orly` v0.65.60) for event construction, signing, and relay communication. **Implements v2.**
 
-### Package: `pkg/fior`
+### Package `pkg/fior`
 
-**`kinds.go`** -- Event kind constants (30100-30105).
+**`kinds.go`** — event kind constants 30100–30105. The numbers survive into v3; four of the six meanings do not.
 
-**`natparam.go`** -- Natural parameter encode/decode and aggregation:
+**`natparam.go`** — natural parameter encode/decode and aggregation:
 
-- `DecodeNaturalParams(hex, dim) → (eta1, eta2, error)` -- hex to float64 vectors
-- `EncodeNaturalParams(eta1, eta2) → hex` -- float64 vectors to hex
-- `Aggregate(globalEta1, globalEta2, diffs)` -- sum η differences in-place
-- `Diff(posteriorEta1, posteriorEta2, priorEta1, priorEta2) → (d1, d2)` -- compute η difference
+- `DecodeNaturalParams(hex, dim) → (eta1, eta2, error)`
+- `EncodeNaturalParams(eta1, eta2) → hex`
+- `Aggregate(globalEta1, globalEta2, diffs)` — sum in place
+- `Diff(posteriorEta1, posteriorEta2, priorEta1, priorEta2) → (d1, d2)`
 
-### Binary: `cmd/e2etest`
+The arithmetic here carries over to v3 unchanged. `Diff` already computes what v3 calls a site contribution; the hex codec is what changes.
 
-Single binary that runs the complete FIOR protocol flow against a live Nostr relay. Steps:
+### Binary `cmd/e2etest`
+
+Runs the full v2 flow against a live relay:
 
 1. Generate a BIP-340 keypair (secp256k1)
-2. Connect to relay via WebSocket
-3. Publish Model Card (30100) for "test-model-v1"
-4. Publish initial Prior (30101) with zero natural parameters
-5. For each of N nodes: call Python testmodel via subprocess, capture posterior
-6. Publish each posterior as a 30102 event
+2. Connect via WebSocket
+3. Publish a Model Card (30100) for `test-model-v1`
+4. Publish an initial Prior (30101) with zero natural parameters
+5. For each of N nodes, invoke the Python testmodel as a subprocess and capture the posterior
+6. Publish each posterior as a 30102
 7. Aggregate all posteriors locally
-8. Publish aggregated Prior (30101, round 1)
-9. Compare against ground truth, print MAE
+8. Publish the aggregated Prior (30101, round 1)
+9. Compare against ground truth and print MAE
 
-Run: `FIOR_TESTMODEL_DIR=.. FIOR_RELAY=wss://nos.lol go run ./cmd/e2etest/`
+```
+FIOR_TESTMODEL_DIR=.. FIOR_RELAY=wss://nos.lol go run ./cmd/e2etest/
+```
 
-Verified: MAE 0.031 vs ground truth (3 nodes × 2000 samples).
+Verified: MAE 0.031 against ground truth with 3 nodes × 2000 samples.
 
 ---
 
-## 4. Docker Stack -- `forum/`
+## 4. Docker Stack — `forum/`
 
-Self-contained local test environment.
+Self-contained local test environment. **Implements v2.**
 
 ### `docker-compose.e2e.yml`
 
-Two services:
+| Service   | Image                            | Purpose                                |
+|-----------|----------------------------------|----------------------------------------|
+| `relay`   | `scsibug/nostr-rs-relay:latest`  | Local Nostr relay, SQLite, no auth      |
+| `e2etest` | Built from `Dockerfile.e2e`      | Runs the full protocol test            |
 
-| Service | Image | Purpose |
-|---------|-------|---------|
-| `relay` | `scsibug/nostr-rs-relay:latest` | Local Nostr relay with SQLite, no auth |
-| `e2etest` | Built from `Dockerfile.e2e` | Runs the full FIOR protocol test |
+```
+docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit
+```
 
-Usage: `docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit`
-
-The relay uses `relay-config.toml` configured for testing: no authentication, no rate limiting, all event kinds allowed, port 8080.
+`relay-config.toml` configures the relay for testing: no authentication, no rate limiting, all event kinds allowed, port 8080.
 
 ### `Dockerfile.e2e`
 
-Multi-stage build:
-1. `golang:1.25-alpine` -- downloads orly dependency, builds Go binary
-2. `python:3.12-slim` -- installs numpy, copies testmodel + Go binary
+Multi-stage: `golang:1.25-alpine` builds the Go binary, `python:3.12-slim` installs numpy and copies the testmodel plus the binary. The e2etest binary connects to `ws://relay:8080`.
 
-The e2etest binary connects to `ws://relay:8080` (the compose service name).
+**v3 requires a third service.** With parameters in blobs, the stack needs a Blossom server, and `cmd/e2etest` needs an upload step. This is the one place where blob-only genuinely costs something: the test model's η is 80 bytes, and it now takes a round trip. The compensation is that the e2e path exercises the same code as production instead of a toy path that only tests exist to use.
 
 ---
 
-## 5. Marketplace UI Integration -- `fior/ui-integration.md`
+## 5. Marketplace UI — `forum/src/` (React)
 
-Design document mapping FIOR protocol events to React marketplace UI state. Covers:
+The forum SPA currently handles NIP-07 login and Blossom upload for arbitrary files. `fior/ui-integration.md` maps v3 events to UI state.
 
-- **Model discovery**: query 30100 events, display model name, description, parameter count
-- **Prior display**: query latest 30101, show round number and derived summary stats
-- **Posterior marketplace**: list 30102 events with trust data from 30105 snapshots
-- **Trust signal indicator**: `z = |score|/std` → strong/moderate/weak positive or negative
-- **Evaluation workflow**: user clicks "Evaluate", client splits local data, runs back-test, publishes 30104
-- **Relay subscription pattern**: subscribe to all FIOR kinds on mount, maintain in-memory event store
+The shape differs substantially from v2's design. The marketplace is a **membership roster**, not a feed of submissions, because sites are addressable and there is one per author. There is **no consensus trust score** to display; the UI shows the viewer's own β, computed locally, clearly labelled as local, alongside benchmark results, which are the only cross-client comparable numbers. And because parameters live in blobs, the UI must distinguish a loaded descriptor from fetched parameters and let the user decide when to spend the bandwidth.
+
+The existing Blossom upload code is directly reusable — it is now on the critical path for every participant rather than an auxiliary feature.
 
 ---
 
-## 6. To Be Done
+## 6. v3 Migration
 
-### Persistent Aggregator
+Concrete work to bring the implementation in line with the spec.
 
-The current `cmd/e2etest` runs once and exits. The production aggregator needs to:
-- Run as a daemon
-- Subscribe continuously to 30102 and 30103 events for its models
-- Maintain per-model state (current prior, registered nodes, pending posteriors)
-- Aggregate on a schedule (every N posteriors or T seconds)
-- Publish 30105 snapshots when enough evaluations accumulate
-- Handle node deregistration (remove parameters when a node leaves)
+### `forum/fiorgo/`
 
-### Marketplace UI (React)
+- `kinds.go` — the constants stay; 30101 through 30105 all change meaning. 30103 moves from Node Registration to Benchmark Result, and 30105 from Trust Snapshot to Benchmark Descriptor.
+- `natparam.go` — replace the hex codec with raw binary `f64le`/`f32le`/`i16le`/`i8`, add per-index scales and stochastic rounding for the integer forms, and add the blob header. `Aggregate` and `Diff` carry over.
+- New: `A(η)` per family, and the BMR `ΔF` evaluation. This is the core of the trust engine and has no v2 equivalent.
+- New: Blossom upload and fetch with SHA-256 verification.
+- New: β resolution — the Bernoulli–Beta combination, the hierarchical attestation prior, and transitive propagation.
+- `cmd/e2etest` — restructure around per-client composition rather than a central aggregation step. Each simulated node composes its own prior, publishes a site, and scores its peers.
 
-The forum SPA (`forum/src/`) currently handles NIP-07 login and Blossom file upload for arbitrary files. Needs to be wired to FIOR event kinds:
-- Replace file listing with model card browsing (query 30100)
-- Replace file detail with posterior listing (query 30102 + 30105)
-- Add trust evaluation workflow (back-test → publish 30104)
-- Show trust signal indicators per parameter group
+### `forum/testmodel/`
 
-### Trust Layer (Stage 2)
+- Publish `Δη` rather than the full posterior. `prior_diff` already computes it; what changes is which quantity is published.
+- Move the `Normal(0, 10²)` prior into the model card's `η₀` so peers can see and reproduce the regularisation.
+- New tests worth having, given v3's specific claims: that per-client composition with all β = 1 reproduces the v2 aggregate; that quantization error with stochastic rounding falls as 1/√N across members; that a poisoned site receives ΔF < 0 in the round it appears; and that ρ backtracking fires when a composed group leaves its domain.
 
-Currently, aggregation is unweighted -- every posterior contributes equally. Stage 2 adds:
-- Evaluator reputation: track which evaluators produce scores that correlate with actual model improvement
-- Consensus-weighted aggregation: `η_global += w_g * η_diff` where `w_g = sigmoid(mean(score/variance))`
-- Adversarial resistance testing: introduce nodes that submit poisoned parameters, verify the trust layer suppresses them
+### `forum/` stack
 
-### Production Model Support
+- Add a Blossom server service to `docker-compose.e2e.yml`.
+- Add blob upload to the e2e flow, before event publication.
 
-The test model uses a simple Bayesian linear regression with closed-form VI updates (analytically tractable). Production models need:
-- Pyro/Numpyro backend for arbitrary ONNX models
-- Stochastic variational inference (SVI) for models without closed-form posteriors
-- GPU-accelerated training (local to each node)
-- ONNX export/import for model definition exchange
+### Validation the spec now requires of clients
 
-### Blossom Integration
+- Decoded vector length against ONNX initializer shapes times the family's value count
+- Blob SHA-256 on fetch
+- Model card `version` on every site before composing it
+- Blob header `group_count` against the model card
 
-The protocol spec references ONNX files via Blossom blob event IDs. The aggregator and marketplace need to:
-- Fetch ONNX files from Blossom servers to validate parameter shapes
-- Verify `onnxhash` (SHA256) against downloaded files
+---
 
-### Buzz Relay Integration
+## 7. Open Work
 
-The client operates a Buzz relay at `buzz.nostri.xyz`. The protocol should eventually be tested against this relay. Buzz requires authentication -- the aggregator and nodes will need Buzz invites or API keys.
+**Production model support.** The test model is Bayesian linear regression with closed-form VI updates. Real models need a Pyro/NumPyro backend, stochastic variational inference where posteriors are not analytically tractable, local GPU training, and ONNX import for arbitrary graphs.
 
-### NIP Submission
+**Trust engine.** BMR scoring, the Bernoulli–Beta combination, and hierarchical plus transitive attestation resolution. Adversarial testing should verify the specific claim the spec makes: that a poisoned site is suppressed in the round it is published, without any coordinated action, because each evaluator scores it against its own free energy.
 
-The protocol spec is clean enough to be submitted as a NIP to `nostr-protocol/nips`. The event kind numbers (30100-30105) have been verified as unused. The client should submit the PR when ready.
+**Marketplace UI.** Wire the React app to the v3 event kinds per the integration guide.
+
+**Buzz relay integration.** The client operates a Buzz relay at `buzz.nostri.xyz`. Buzz requires authentication, so participants will need invites or API keys, and the client will need NIP-42.
+
+**NIP submission.** The kind numbers 30100–30105 were verified unused against `nostr-protocol/nips` for v2, but the semantics have changed entirely and the check should be repeated before submission. The `fior` NIP-11 extension object should be included in the proposal, since it is how a relay declares support.
+
+**Open question the spec records rather than solves.** Transitive trust discounts a peer's attestations by `E[β]` — trust in that peer's *parameters* — used as a proxy for trust in their *judgement about others*. These are not the same quantity. Separating them would require a second Beta per edge.
