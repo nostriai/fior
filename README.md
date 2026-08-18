@@ -1,51 +1,109 @@
-# Federated inference over relays (Fior)
+# FIOR - Federated Inference Over Relays
 
-## Introduction
-The specification for a multi-backend interface for Federated inference over relays. A distributed system designed to carry out probabilistic inference (learning) and decision making tasks using machine learning models across multiple nodes while preserving data privacy and removing the need for data movement. The inspiration for the framework is based on the recent results on probabilistic federated learning derived using variational inference. 
+A Nostr protocol for collaborative machine learning without sharing raw data.
 
-## Functional Requirements
-* The inference and decision making tasks are performed localy on a clinet side.
-* Clients exchange model inference results in terms of parameters of a posterior distributions over model parameters.
-* Prior and posterior distributions are specified in the terms of natural parameters of an [exponential family](distributions.md).
-* An interface for nodes to join, leave and interact with the federated network is specified in [interface](interface.md) doc.
+## Overview
 
-## Non-functional Requirements
-* Clients must preserve data privacy by ensuring that raw data does not leave its original node.
-* Federation should scale horizontally, allowing more nodes to join the federation without degrading inference results.
+FIOR enables multiple parties to train a model on their private data and exchange only statistical summaries. Each party combines contributions locally, weighting peers by how much they improve inference. There is no aggregator - every participant computes independently.
 
-## Interfaces
-* Fior: an API for nodes to join or leave the federated network and exchange parameters over nostr protocol.
+## How It Works
 
-## Use Cases
-* Use Case 1: Node Registration
-  - Actors: Node
-    - Goal: Join the federated network
-    - Precondition: The node has a Fior client installed
-    - Main Success Scenario: Node sends a request to an aggregator, aggregator adds the node to its registry, node recieves initial parameter values.
+1. **Model Card** (30100): Creator publishes ONNX model with distribution mappings
+2. **Site Contribution** (30101): Nodes publish what they learned (Δη)
+3. **Trust Attestation** (30102): Nodes rate peers with a scalar p value
+4. **Local Composition**: Each client builds its own prior: `η₀ + Σ p·Δη`
 
-* Use Case 2: Node removal
-  - Actors: Node
-    - Goal: Leave the federated network
-    - Preconditions: The node is a member of the federation
-    - Main Success Scenario: Node sends a request to an aggregator, aggregator removes parameters corresponding to that node from the global solution and de-registers the node.
+## Quick Start
 
-## Testing and Acceptance Criteria
-* The system is tested with different numbers of nodes, verifying correct operation with a varying number of nodes.
-* Probabilistic inference tasks are completed successfully and results are consistent with expectations.
-* Nodes can join and leave the network without causing disruption.
+### Python
 
-## Glossary
-* Pyro/Numpyro: Probabilistic programing language frameworks
-* Inference: The process of inverting a probabilistic model and forming posterior beliefs over latent random variables.
-* Node: A participant in the federated network.
-* Aggregator: A node that recieves the solitions from members of the federation collects all solutions into a global solution and broadcasts the latest results to all members of the federation. 
+```python
+from fior import Client, ModelCard
+
+# Connect to relay
+client = Client("wss://relay.example.com")
+
+# Fetch a model
+model = client.fetch_model_card("pump-failure-v1")
+
+# Fetch sites from trusted peers
+sites = client.fetch_sites("pump-failure-v1")
+
+# Compose prior from trusted peers
+p_values = [0.9, 0.7, 0.8]  # trust weights
+prior = client.compose_prior(model.eta0, sites, p_values)
+
+# Train locally...
+# Publish your site
+client.publish_site(private_key, model.id, model.version, delta_eta, cavity)
+```
+
+### JavaScript
+
+```javascript
+import { Client } from 'fior';
+
+const client = new Client('wss://relay.example.com');
+
+// Fetch a model
+const model = await client.fetchModelCard('pump-failure-v1');
+
+// Fetch sites
+const sites = await client.fetchSites('pump-failure-v1');
+
+// Compose prior
+const prior = client.composePrior(model.eta0, sites, [0.9, 0.7, 0.8]);
+
+// Train locally...
+// Publish your site
+await client.publishSite(privateKey, model.id, model.version, deltaEta, cavity);
+```
+
+## Event Kinds
+
+| Kind | Name | Purpose |
+|------|------|---------|
+| 30100 | Model Card | ONNX blob, distributions, base prior |
+| 30101 | Site Contribution | Node's likelihood approximation Δη |
+| 30102 | Trust Attestation | Scalar p rating a peer |
+
+All kinds are addressable: one event per `(kind, pubkey, d)`, latest supersedes.
+
+## Trust Layer
+
+- **BMR**: Bayesian Model Reduction scores peers via log Bayes factor
+- **Loewner Cap**: Bounds claimed precision against other peers
+- **Corroboration**: One-peer-one-vote checking agreement with trusted peers
+- **Novelty**: First-seen tracking defends against replay attacks
+
+p is local and per-client. No consensus score exists.
+
+## Repository Structure
+
+```
+fior/
+├── protocol.md          # Protocol specification v3
+├── architecture.md      # Architecture and implementation plan
+├── interface.md         # Client API reference
+├── ui-integration.md    # UI integration guide
+├── distributions.md     # Exponential family reference
+├── fior-python/         # Python reference library (in progress)
+├── fior-js/             # JavaScript reference library (planned)
+└── test/
+    └── fior_sim.py      # Algorithm reference implementation
+```
+
+## Implementation Status
+
+| Component | Status |
+|-----------|--------|
+| Protocol spec | v3 complete |
+| Python library | In progress |
+| JavaScript library | Not started |
+| Algorithm reference | fior_sim.py |
 
 ## References
-* [Federated Learning as Variational Inference: A Scalable Expectation Propagation Approach
-Han Guo, Philip Greengard, Hongyi Wang, Andrew Gelman, Yoon Kim, Eric P. Xing](https://arxiv.org/abs/2302.04228)
-* [Partitioned Variational Inference: A Framework for Probabilistic Federated Learning
-Matthew Ashman, Thang D. Bui, Cuong V. Nguyen, Stratis Markou, Adrian Weller, Siddharth Swaroop, Richard E. Turner](https://arxiv.org/abs/2202.12275)
-* [Personalized Federated Learning via Variational Bayesian Inference
-Xu Zhang, Yinchuan Li, Wenpeng Li, Kaiyang Guo, Yunfeng Shao](https://proceedings.mlr.press/v162/zhang22o.html)
-* [Partitioned Variational Inference: A unified framework encompassing federated and continual learning
-Thang D. Bui, Cuong V. Nguyen, Siddharth Swaroop, Richard E. Turner](https://arxiv.org/abs/1811.11206)
+
+- [Federated Learning as Variational Inference](https://arxiv.org/abs/2302.04228)
+- [Partitioned Variational Inference](https://arxiv.org/abs/2202.12275)
+- [Bayesian Model Reduction](https://arxiv.org/abs/1805.07092)

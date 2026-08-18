@@ -1,4 +1,4 @@
-# FIOR Protocol -- UI Integration Guide
+# FIOR Protocol - UI Integration Guide
 
 ## Event-to-UI Mapping
 
@@ -6,265 +6,196 @@
 
 The marketplace home page lists available models.
 
-**Query:** Fetch all kind-30100 events with the target relay filter.
+**Query:** Fetch all kind-30100 events.
 
 **Data extracted from 30100 tags:**
 
-| Tag        | Maps to                              |
-|------------|--------------------------------------|
-| `d`        | `model.id`                           |
-| `title`    | `model.displayName`                  |
-| `summary`  | `model.description`                  |
-| `version`  | `model.version`                      |
-| `agg`      | `model.aggregatorNpub`               |
-| `onnx`     | `model.onnxBlossomEventId`           |
-| `onnxhash` | `model.onnxHash` (verify integrity)  |
-| `dist`     | `model.parameterGroups[].name`       |
-| `group`    | `model.parameterGroups[].name`       |
+| Tag | Maps to |
+|-----|---------|
+| `d` | `model.id` |
+| `t` | `model.displayName` |
+| `s` | `model.description` |
+| `v` | `model.version` |
+| `o` | `model.onnxBlob` (SHA-256) |
+| `D` | `model.parameterDistributions[]` |
+| `g` | `model.parameterGroups[]` |
 
 **UI state computed from 30100:**
 
 ```
 model.totalParameters = sum of all group/initializer dimensions
-model.groupCount       = count of distinct groups
-model.framework        = content.framework
-model.minSamples       = content.min_samples
+model.groupCount = count of distinct groups
+model.framework = content.framework
+model.minSamples = content.min_samples
 ```
 
 ---
 
-### Prior Display (Per-Model View)
+### Site Listing (Per-Model View)
 
-When a user selects a model, show the current global parameters.
+When a user selects a model, show all site contributions.
 
-**Query:** Fetch latest kind-30101 event for this model `d` tag (order by `created_at` descending, limit 1).
+**Query:** Fetch kind-30101 events for this model `d` tag.
 
-**Data extracted from 30101 tags:**
+**Data extracted from 30101:**
 
-| Tag     | Maps to                          |
-|---------|----------------------------------|
-| `round` | `prior.aggregationRound`         |
-| `d`     | `prior.modelId`                  |
-| `η`     | `prior.groupParameters[name]`    |
+| Tag | Maps to |
+|-----|---------|
+| `d` | `site.modelId` |
+| `a` | `site.modelCardRef` |
+| `v` | `site.modelVersion` |
+| `m` | `site.cavityMembers[]` |
+| `p` | `site.memberPubkeys[]` |
+| `x` | `site.deltaEtaBlob` |
 
-**UI state computed from 30101:**
-
+**Metadata from 30101 content:**
 ```
-for each η tag:
-    buf = hex.decode(η.data)
-    floats = float64LE.decode(buf)
-    prior.groupParams[η.name] = {
-        naturalParams: floats,
-        dim: len(floats) / 2,  // for Normal; varies by distribution
-    }
-```
-
-**Display:** Show round number, node count, total samples. Do NOT show raw `η` vectors in the UI -- they are not human-readable. Show derived summary:
-```
-prior.groupSummary[η.name] = {
-    paramCount: dim,
-    distribution: from model card,
-    // Derived from natural params (example for Normal):
-    meanMagnitude: sqrt(mean(μ_i²)),  // rough signal of "how active" this group is
-    precisionMagnitude: mean(-2 * η_d+i),  // average certainty
-}
+site.samples = content.samples
+site.freeEnergy = content.free_energy
+site.durationSec = content.duration_sec
+site.frameworkVer = content.framework_version
 ```
 
----
-
-### Marketplace Listing (Per-Posterior View)
-
-List posterior submissions alongside trust data.
-
-**Query:** Fetch kind-30102 events for the model. For each, fetch latest 30105 snapshot.
-
-**Data extracted from 30102:**
-
-| Tag | Maps to                        |
-|-----|--------------------------------|
-| `d` | `posterior.modelId`            |
-| `p` | `posterior.priorEventId`       |
-| `η` | `posterior.groupParams[name]`  |
-
-**Metadata from 30102 content:**
-```
-posterior.samples       = content.samples
-posterior.elbo          = content.elbo
-posterior.durationSec   = content.duration_sec
-posterior.frameworkVer  = content.framework_version
-```
-
-**Data extracted from 30105 (Trust Snapshot):**
-
-| Tag group field | Maps to                                    |
-|-----------------|--------------------------------------------|
-| `name`          | `trust.groupScores[name].name`             |
-| `mean_score`    | `trust.groupScores[name].meanScore`        |
-| `std_score`     | `trust.groupScores[name].stdScore`         |
-| `evaluator_count` | `trust.groupScores[name].evaluatorCount` |
-
-**UI state computed from 30102 + 30105:**
-
-```
-posterior.trustSummary = {
-    overall: {
-        evaluatorCount: max(group.evaluatorCount),
-        // Weighted average of group mean scores, weighted by group dim
-        aggregateScore: sum(score * dim) / sum(dim),
-    },
-    perGroup: trust.groupScores,  // direct pass-through from 30105
-}
-```
-
-**Display -- Marketplace Grid Item:**
+**Display - Site Grid Item:**
 
 ```
 ┌─────────────────────────────────────┐
 │                                     │
 │  npub1abc1234... (author)           │
 │  8,234 samples | 42s training       │
-│  ELBO: -1247.3                      │
+│  Free energy: -1247.3               │
 │                                     │
-│  ┌─ Trust ────────────────────────┐│
-│  │ 3 evaluators                    ││
-│  │ fc-layers:  Δ+48.6 (strong)    ││
-│  │ convs:      Δ-3.2  (weak)     ││
-│  └─────────────────────────────────┘│
+│  Built on: 3 peers                  │
+│  Model version: 3                   │
 │                                     │
-│  [Download] [Evaluate] [Use as Prior]│
+│  [View] [Use as Prior]              │
 └─────────────────────────────────────┘
 ```
 
 ---
 
-### Trust Evaluation Workflow (User Initiates Back-Test)
+### Trust Attestations
 
-A user clicks "Evaluate" on a posterior. The client:
+Display trust attestations for a peer.
 
-1. Fetches the posterior's `η` data
-2. Loads the user's local private data (client-side only, never leaves the machine)
-3. Splits into train/holdout
-4. Trains a control model (user's prior + train split)
-5. Evaluates both control and tested posterior on holdout
-6. Computes per-group ELBO delta / log-likelihood delta
-7. Publishes kind-30104
+**Query:** Fetch kind-30102 events where `p` tag matches the target pubkey.
 
-**UI state during evaluation:**
+**Data extracted from 30102:**
 
-```
-eval.status  = "running" | "complete" | "error"
-eval.progress = { currentGroup, groupsDone, totalGroups }
-eval.results = {
-    postEventId: "...",
-    metric: "elbo_delta",
-    holdoutSamples: 1647,
-    controlElbo: -1247.3,
-    testedElbo: -1198.7,
-    perGroup: [
-        {name: "fc-layers", score: 48.6, variance: 12.3},
-        {name: "convs",    score: -3.2, variance: 8.1},
-    ]
-}
-```
+| Tag | Maps to |
+|-----|---------|
+| `d` | `attestation.scope` (target, model, or group) |
+| `p` | `attestation.targetPubkey` |
+| `i` | `attestation.inclusionProbability` |
 
-**Display -- Evaluation Result:**
+**Display - Trust Panel:**
 
 ```
-┌───────────────────────────────────────┐
-│ Evaluation complete                   │
-│                                       │
-│ Holdout: 1,647 samples                │
-│ Baseline ELBO: -1247.3                │
-│ Tested ELBO:   -1198.7  (+48.6)      │
-│                                       │
-│ Per-group breakdown:                  │
-│ fc-layers   +48.6 ± 12.3  ████████    │
-│ convs        -3.2 ±  8.1  █░░░░░░░    │
-│                                       │
-│ [Publish Evaluation to Relay]         │
-└───────────────────────────────────────┘
+┌─────────────────────────────────────┐
+│ Trust in npub1abc1234...            │
+│                                     │
+│ Overall:           0.82 ████████░░  │
+│ fc-layers group:   0.91 █████████░  │
+│ convs group:       0.64 ██████░░░░  │
+│                                     │
+│ Based on 5 attestations             │
+└─────────────────────────────────────┘
 ```
 
 ---
 
-### Trust Snapshot Display (Aggregated Consensus)
+### Publishing a Trust Attestation
 
-When displaying a posterior in the marketplace, the UI queries the latest 30105 snapshot for that posterior. This avoids replaying all individual 30104 events.
+User clicks "Trust" or "Distrust" on a peer's site.
 
-**If no 30105 exists yet:** Show "No evaluations yet. Be the first to evaluate."
+**Client action:**
 
-**If 30105 exists:**
+1. Compute local p for this peer using BMR
+2. Optionally adjust based on own judgment
+3. Publish kind-30102 with:
+   - `d`: scope (peer, peer:model, or peer:model:group)
+   - `p`: target pubkey
+   - `i`: inclusion probability (0 to 1)
 
-```
-┌─────────────────────────────────────────┐
-│ Trust Consensus (3 evaluators)          │
-│                                         │
-│ Group        Score      Std    Signal   │
-│ ─────────────────────────────────────  │
-│ fc-layers    +48.6     ±12.3  ████░░   │
-│ convs         -3.2     ± 8.1  █░░░░░   │
-│                                         │
-│ Aggregate: +22.7 (weighted by dim)      │
-└─────────────────────────────────────────┘
-```
-
-**UI logic for signal strength indicator:**
+**UI state:**
 
 ```
-function signalStrength(meanScore, stdScore):
-    if meanScore <= 0:
-        return "negative"
-    z = abs(meanScore) / max(stdScore, epsilon)
-    if z >= 2.0:
-        return "strong_positive"
-    if z >= 1.0:
-        return "moderate_positive"
-    return "weak_positive"
-```
-
----
-
-### Registration & Federation Status
-
-**User's registered models:**
-
-Query kind-30103 events by the user's npub, filter `action=join`, for each model `d`. If the latest event for that model has `action=leave`, the user is not registered.
-
-**Per-model federation status in UI:**
-
-```
-model.nodeCount = count of distinct npubs with latest 30103 action=join
-// This information is typically in the prior broadcast content.node_count
+attestation.status = "publishing" | "published" | "error"
+attestation.scope = "peer" | "model" | "group"
+attestation.value = 0.82  // user-adjusted p
 ```
 
 ---
 
 ## Summary of UI Data Dependencies
 
-| UI View             | Events Queried                        | Freshness Strategy     |
-|---------------------|---------------------------------------|------------------------|
-| Marketplace browse  | 30100 (all)                           | On mount + subscription|
-| Model detail        | 30100 (latest for `d`), 30101 (latest)| On mount + subscription|
-| Posterior list      | 30102 (all for `d`), 30105 (per post) | On mount + subscription|
-| Evaluate posterior  | 30102 (target), local data            | Fetch once + compute   |
-| Trust breakdown     | 30105 (latest for post)               | On mount               |
-| My registrations    | 30103 (by author npub)                | On mount + subscription|
+| UI View | Events Queried | Freshness Strategy |
+|---------|----------------|-------------------|
+| Marketplace browse | 30100 (all) | On mount + subscription |
+| Model detail | 30100 (latest for `d`) | On mount + subscription |
+| Site list | 30101 (all for `d`) | On mount + subscription |
+| Trust panel | 30102 (for target pubkey) | On mount + subscription |
 
 ## Relay Subscription Pattern
 
-```
-// On marketplace mount -- subscribe to all FIOR events for the relay
+```javascript
+// On marketplace mount - subscribe to all FIOR events
 const sub = relay.subscribe([
-    {kinds: [30100, 30101, 30102, 30103, 30104, 30105]},
+    {kinds: [30100, 30101, 30102]},
 ]);
 
 // Client maintains an in-memory event store:
-//   modelCards:     Map<d_tag, 30100_event>
-//   priors:         Map<d_tag, 30101_event>    (latest only)
-//   posteriors:     Map<eventId, 30102_event>
-//   evaluations:    Map<postEventId, 30104_event[]>
-//   snapshots:      Map<postEventId, 30105_event>  (latest only)
-//   registrations:  Map<d_tag, {action, npub, timestamp}>
+//   modelCards:    Map<d_tag, 30100_event>
+//   sites:         Map<event_id, 30101_event>
+//   attestations:  Map<target_pubkey, 30102_event[]>
 ```
 
-Subscription provides live updates: new posteriors and evaluations appear in the UI without polling.
+Subscription provides live updates: new sites and attestations appear in the UI without polling.
+
+---
+
+## Trust Display Logic
+
+### Computing Local p
+
+The client computes p for each peer using BMR:
+
+```javascript
+function computeP(site, trustedSites, eta0) {
+    // Build cavity (prior without this peer)
+    const cavity = composePrior(eta0, trustedSites, pValues);
+    
+    // Compute ΔF at full weight
+    const deltaF = bmrDeltaF(
+        cavity + site.deltaEta,  // with peer at full weight
+        cavity,                  // without peer
+        cavity + localLikelihood, // with local data
+        cavity + site.deltaEta + localLikelihood // both
+    );
+    
+    // Resolve p from ΔF and prior β
+    return pFrom(deltaF, beta);
+}
+```
+
+### Displaying p
+
+p is a probability in (0,1). Display as:
+- **Bar**: visual width proportional to p
+- **Color**: red (0) → yellow (0.5) → green (1)
+- **Label**: "distrusting" (< 0.3), "neutral" (0.3-0.7), "trusting" (> 0.7)
+
+### Attestations Feed
+
+Show recent attestations in a feed:
+
+```
+┌─────────────────────────────────────┐
+│ Recent Trust Updates                │
+│                                     │
+│ npub1abc... trusts npub1def... 0.82 │
+│ npub1ghi... trusts npub1jkl... 0.45 │
+│ npub1mno... distrusts npub1pqr...   │
+│                                     │
+└─────────────────────────────────────┘
+```
