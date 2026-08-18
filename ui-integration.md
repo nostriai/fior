@@ -1,201 +1,295 @@
-# FIOR Protocol - UI Integration Guide
+# FIOR Protocol -- UI Integration Guide
 
-## Event-to-UI Mapping
+## What changed from v2
 
-### Model Discovery (Marketplace Browse)
+The v2 marketplace was a list of posterior submissions ranked by a consensus trust score
+published by the aggregator. Neither exists in v3:
 
-The marketplace home page lists available models.
+- Sites are **addressable** — one per `(author, model)`, latest wins. There is no growing
+  list of submissions to page through. The marketplace shows a **membership roster**, not
+  a feed.
+- There is **no consensus trust score**. p is local to each client and derived from its
+  own data, so two honest clients will legitimately disagree about the same peer. The UI
+  shows *your* p, and never a total. There are no published scores to rank by.
+- Parameters are never in events. Every η payload is a Blossom blob, so the UI must
+  distinguish "descriptor loaded" from "parameters fetched" and let the user choose when
+  to spend the bandwidth.
 
-**Query:** Fetch all kind-30100 events.
+---
+
+## Model Discovery (Marketplace Browse)
+
+**Query:** `{kinds:[30100]}`
 
 **Data extracted from 30100 tags:**
 
-| Tag | Maps to |
-|-----|---------|
-| `d` | `model.id` |
-| `t` | `model.displayName` |
-| `s` | `model.description` |
-| `v` | `model.version` |
-| `o` | `model.onnxBlob` (SHA-256) |
-| `D` | `model.parameterDistributions[]` |
-| `g` | `model.parameterGroups[]` |
+| Tag       | Maps to                                 |
+|-----------|-----------------------------------------|
+| `d`       | `model.id`                              |
+| `title`   | `model.displayName`                     |
+| `summary` | `model.description`                     |
+| `version` | `model.version`                         |
+| `onnx`    | `model.onnx = {hash, bytes, servers}`   |
+| `dist`    | `model.parameterGroups[].name`          |
+| `group`   | `model.parameterGroups[].name`          |
+| `x`       | `model.basePrior = {hash, enc, bytes}`  |
+| `blossom` | `model.blossomServers[]`                |
+| `ttl`     | `model.siteTtlSeconds`                  |
 
-**UI state computed from 30100:**
+**Computed:**
 
 ```
-model.totalParameters = sum of all group/initializer dimensions
-model.groupCount = count of distinct groups
-model.framework = content.framework
-model.minSamples = content.min_samples
+model.totalParameters = sum of group dimensions from the ONNX graph
+model.groupCount      = count of distinct groups
+model.memberCount     = count of live 30101 sites (see below)
+```
+
+`memberCount` requires a second query. Use NIP-45 `COUNT` where the relay supports it
+rather than fetching every site descriptor just to display a number.
+
+---
+
+## Membership Roster (Per-Model View)
+
+**Query:** `{kinds:[30101], "#d":[modelId]}`
+
+The relay returns exactly one site per author. Sites are descriptors — the `x` tag
+carries a hash, not parameters.
+
+| Tag          | Maps to                                     |
+|--------------|---------------------------------------------|
+| `d`          | `site.modelId`                              |
+| `v`          | `site.modelCardVersion`                     |
+| `x`          | `site.blob = {hash, enc, bytes, servers}`   |
+| `a` (cavity) | `site.cavityRef`                            |
+| `expiration` | `site.expiresAt`                            |
+
+**Metadata from content** — advisory only, never an input to composition or trust:
+
+```
+site.samples, site.freeEnergy, site.durationSec, site.frameworkVersion
+```
+
+**Client-side filtering the UI must apply:**
+
+```
+site.stale     = expiresAt < now, or created_at + model.siteTtlSeconds < now
+site.mismatched = site.modelCardVersion !== model.version
+```
+
+Stale and mismatched sites are excluded from composition. Show them greyed with the
+reason rather than hiding them — a roster that silently shrinks is confusing.
+
+**Roster row:**
+
+```
+┌──────────────────────────────────────────────────────┐
+│ npub1abc1234…                            8,234 samples│
+│ i8 · 24.6 KB · not fetched                            │
+│ p  —  (fetch to evaluate)                [Fetch]      │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### Site Listing (Per-Model View)
+## Parameter Fetch and Local Trust
 
-When a user selects a model, show all site contributions.
+This is the interaction v2 had no equivalent for. Because η lives in blobs, the client
+decides what to download, and p cannot be computed for anything not downloaded.
 
-**Query:** Fetch kind-30101 events for this model `d` tag.
-
-**Data extracted from 30101:**
-
-| Tag | Maps to |
-|-----|---------|
-| `d` | `site.modelId` |
-| `a` | `site.modelCardRef` |
-| `v` | `site.modelVersion` |
-| `m` | `site.cavityMembers[]` |
-| `p` | `site.memberPubkeys[]` |
-| `x` | `site.deltaEtaBlob` |
-
-**Metadata from 30101 content:**
-```
-site.samples = content.samples
-site.freeEnergy = content.free_energy
-site.durationSec = content.duration_sec
-site.frameworkVer = content.framework_version
-```
-
-**Display - Site Grid Item:**
+**Per-site fetch state:**
 
 ```
-┌─────────────────────────────────────┐
-│                                     │
-│  npub1abc1234... (author)           │
-│  8,234 samples | 42s training       │
-│  Free energy: -1247.3               │
-│                                     │
-│  Built on: 3 peers                  │
-│  Model version: 3                   │
-│                                     │
-│  [View] [Use as Prior]              │
-└─────────────────────────────────────┘
+site.fetchState = "descriptor" | "fetching" | "resolved" | "unresolvable"
+```
+
+`unresolvable` is **not an error**. The blob could not be retrieved from any hinted
+server or the model card's `blossom` list. The member is simply absent from composition,
+and returns if the bytes become retrievable. Display it as a neutral state with a retry
+affordance, not a failure.
+
+**After fetch, the client scores every resolved peer locally:**
+
+```
+// the peer enters the full model at weight 1, not at its current p;
+// the reference holds every OTHER peer at its current p
+deltaF[peer][group] = A(η_q⁺) + A(η_p⁻) − A(η_q⁻) − A(η_p⁺)
+p[peer][group]   = 1 / (1 + (b/a)·exp(−deltaF[peer][group]))
+```
+
+`(a, b)` is derived locally from the attestation store — each attestation is a scalar
+`p_{B→C}` contributing `p_{A→B}·κ_r·(p_{B→C}, 1−p_{B→C})` at the viewer's own `κ_r`.
+Absent any attestations it is `(1, 1)` and `p` reduces to `σ(ΔF)`.
+
+**Two quantities, two names.** `β = a/(a+b)` is the *prior* inclusion probability, set by
+attestations alone and equal to `0.5` for a stranger. `p` is the *posterior*,
+`P(z = 1 | this viewer's data)`, and it is what weights the composition. Do not label a
+`p` as "β" in the UI: the panel below shows both, and showing a posterior under the name
+of its prior is the specific confusion this guide previously had.
+
+**Trust panel — note this is per-viewer, not consensus:**
+
+```
+┌─ Your weighting of npub1abc1234… ────────────────────┐
+│ Computed from your data. Other nodes will differ.    │
+│                                                      │
+│ Group        ΔF        p  (posterior)                │
+│ ────────────────────────────────────────────────     │
+│ fc-layers   +48.6    0.94  ████████░░                │
+│ convs        −3.2    0.28  ██░░░░░░░░                │
+│                                                      │
+│ Prior β = 0.77   Beta(3.0, 0.9), 2 attestations, κᵣ=4│
+│                                              [Attest]│
+└──────────────────────────────────────────────────────┘
+```
+
+Label the panel explicitly as local. The single largest way to mislead a user here is to
+present a per-viewer weight as though it were a community verdict.
+
+p must be recomputed whenever a peer's site changes, since `ΔF` describes the current
+`Δη` and nothing else. A site event arriving over the subscription invalidates that
+peer's p immediately.
+
+---
+
+## Composition State
+
+```
+composition = {
+    members: [{pubkey, siteEventId, p: {perGroup}}],
+    eta: {perGroup},
+    invalid: [groupName],
+    excluded: [{pubkey, reason: "stale" | "mismatched" | "unresolvable" | "unfetched"}],
+}
+```
+
+**Surface a group that leaves its natural parameter domain** — with Normal groups, a
+precision term going non-negative. Sites are differences, so a weighted sum of valid
+sites need not be valid. It is usually the first visible symptom of an over-quantized or
+adversarial site, and the protocol specifies no recovery, so the composition simply
+cannot be used until the user drops a member or refetches at a wider encoding. Say that
+plainly rather than presenting a silently unusable prior.
+
+```
+┌─ Your prior ─────────────────────────────────────────┐
+│ 12 of 17 members included                            │
+│ ⚠ group `convs` left its valid domain — cannot compose│
+│ Excluded: 3 unfetched, 1 stale, 1 version mismatch   │
+│                                                      │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### Trust Attestations
+## Provenance
 
-Display trust attestations for a peer.
-
-**Query:** Fetch kind-30102 events where `p` tag matches the target pubkey.
-
-**Data extracted from 30102:**
-
-| Tag | Maps to |
-|-----|---------|
-| `d` | `attestation.scope` (target, model, or group) |
-| `p` | `attestation.targetPubkey` |
-| `i` | `attestation.inclusionProbability` |
-
-**Display - Trust Panel:**
+Every site carries the member list of the cavity it was fitted against — one `m` tag per
+member, plus an indexed `p` tag per member pubkey.
 
 ```
-┌─────────────────────────────────────┐
-│ Trust in npub1abc1234...            │
-│                                     │
-│ Overall:           0.82 ████████░░  │
-│ fc-layers group:   0.91 █████████░  │
-│ convs group:       0.64 ██████░░░░  │
-│                                     │
-│ Based on 5 attestations             │
-└─────────────────────────────────────┘
+site.members = [{pubkey, siteEventId, p: [perGroup]}]   // from `m` tags
+```
+
+**Two views fall out of this, and both are worth building.**
+
+*Upstream* — what this peer built on. Render the member list as named peers with the `p`
+each was given, so a user can see whose work a site rests on. A site with no `m` tags was
+composed against `η₀` alone; label it "first round", not "no sources".
+
+*Downstream* — who built on this peer. `{kinds:[30101], "#p":[peerPubkey]}` returns every
+site that pinned this one as a member. This is the derivation graph, and it is the only
+place in the protocol where a peer's influence on others is publicly visible rather than
+private to each evaluator.
+
+**Offer verification.** Members are pinned by event id, so the client can refetch each one,
+recompute `η₀ + Σ p·Δη`, and check it against the site's own `Δη` plus the poster's
+claimed posterior:
+
+```
+site.verification = "unverified" | "verifying" | "matches" | "mismatch"
+```
+
+`mismatch` means the published `Δη` is not the difference the author claims it is. Surface
+it plainly — it is one of the few objectively checkable failures in the system.
+
+Do not present the derivation graph as a ranking. Being built upon is not endorsement:
+a site can be widely used and still be scored badly by everyone using it, because `p` is
+per-evaluator and never published as a total.
+
+---
+
+## Attestations
+
+**Query:** `{kinds:[30102], "#p":[peerPubkey]}` — who has attested about this peer.
+
+```
+attestation.p      = <scalar in (0,1)>   // the attester's POSTERIOR p, from `incl`
+attestation.scope  = "peer" | "peer:model" | "peer:model:group"
+```
+
+An attestation is one number. It carries no confidence, because the publisher has none to
+report — `ΔF` is never accumulated — and because a weight a publisher puts on its own
+testimony is not something a reader should honour. The viewer's own `κ_r` supplies the
+weight. **Do not render an uncertainty for an attestation**; earlier revisions exposed an
+`sd` from a Beta pair, and there is no longer a pair, nor was the spread ever read by the
+trust layer. A legacy `beta` tag displays as its single value, or `a/(a+b)` if a pair.
+
+**Publishing is voluntary and must be presented that way.** A node that publishes none is
+fully functional. Do not gate features on attesting, and do not nag.
+
+Publishing an attestation reveals a trust judgement about a named peer permanently and
+publicly. Confirm before publishing, and show the scope plainly — a peer-level
+attestation is a much broader statement than a group-level one.
+
+```
+┌─ Attest to npub1abc1234… ────────────────────────────┐
+│ Your local evidence: ΔF +48.6 on fc-layers           │
+│                                                       │
+│ Scope:  ( ) this peer, everywhere                     │
+│         ( ) this peer on pump-failure-v1              │
+│         (•) this peer on pump-failure-v1 / fc-layers  │
+│                                                       │
+│ Publishing is public and permanent.   [Cancel][Publish]│
+└───────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### Publishing a Trust Attestation
+## Data Dependencies
 
-User clicks "Trust" or "Distrust" on a peer's site.
-
-**Client action:**
-
-1. Compute local p for this peer using BMR
-2. Optionally adjust based on own judgment
-3. Publish kind-30102 with:
-   - `d`: scope (peer, peer:model, or peer:model:group)
-   - `p`: target pubkey
-   - `i`: inclusion probability (0 to 1)
-
-**UI state:**
-
-```
-attestation.status = "publishing" | "published" | "error"
-attestation.scope = "peer" | "model" | "group"
-attestation.value = 0.82  // user-adjusted p
-```
+| UI View            | Events Queried                              | Blobs Fetched        | Freshness              |
+|--------------------|---------------------------------------------|----------------------|------------------------|
+| Marketplace browse | 30100 (all), 30101 COUNT                    | none                 | On mount + subscription|
+| Model detail       | 30100 (latest for `d`)                       | ONNX, η₀             | On mount + subscription|
+| Membership roster  | 30101 (latest per author for `d`)            | none                 | On mount + subscription|
+| Local trust panel  | 30102 (`#p` per peer)                        | per-site Δη, on demand| Recompute on site change|
+| Provenance (upstream)| the site's own `m` tags                     | members' Δη, to verify| On open                |
+| Provenance (downstream)| 30101 (`#p` per peer)                    | none                 | On mount + subscription|
 
 ---
-
-## Summary of UI Data Dependencies
-
-| UI View | Events Queried | Freshness Strategy |
-|---------|----------------|-------------------|
-| Marketplace browse | 30100 (all) | On mount + subscription |
-| Model detail | 30100 (latest for `d`) | On mount + subscription |
-| Site list | 30101 (all for `d`) | On mount + subscription |
-| Trust panel | 30102 (for target pubkey) | On mount + subscription |
 
 ## Relay Subscription Pattern
 
-```javascript
-// On marketplace mount - subscribe to all FIOR events
+```js
 const sub = relay.subscribe([
     {kinds: [30100, 30101, 30102]},
 ]);
 
-// Client maintains an in-memory event store:
-//   modelCards:    Map<d_tag, 30100_event>
-//   sites:         Map<event_id, 30101_event>
-//   attestations:  Map<target_pubkey, 30102_event[]>
+// In-memory store. Note the addressable kinds are keyed by coordinate,
+// not by event id — a new event for the same coordinate REPLACES.
+//   modelCards:   Map<"30100:<pk>:<d>", event>
+//   sites:        Map<"30101:<pk>:<d>", event>     // one per author per model
+//   attestations: Map<"30102:<pk>:<d>", event>
+
+// Separate, because blobs are not events and are not pushed:
+//   params:       Map<blobHash, Float64Array>      // fetched on demand
 ```
 
-Subscription provides live updates: new sites and attestations appear in the UI without polling.
+Two subscription behaviours that differ from v2:
 
----
-
-## Trust Display Logic
-
-### Computing Local p
-
-The client computes p for each peer using BMR:
-
-```javascript
-function computeP(site, trustedSites, eta0) {
-    // Build cavity (prior without this peer)
-    const cavity = composePrior(eta0, trustedSites, pValues);
-    
-    // Compute ΔF at full weight
-    const deltaF = bmrDeltaF(
-        cavity + site.deltaEta,  // with peer at full weight
-        cavity,                  // without peer
-        cavity + localLikelihood, // with local data
-        cavity + site.deltaEta + localLikelihood // both
-    );
-    
-    // Resolve p from ΔF and prior β
-    return pFrom(deltaF, beta);
-}
-```
-
-### Displaying p
-
-p is a probability in (0,1). Display as:
-- **Bar**: visual width proportional to p
-- **Color**: red (0) → yellow (0.5) → green (1)
-- **Label**: "distrusting" (< 0.3), "neutral" (0.3-0.7), "trusting" (> 0.7)
-
-### Attestations Feed
-
-Show recent attestations in a feed:
-
-```
-┌─────────────────────────────────────┐
-│ Recent Trust Updates                │
-│                                     │
-│ npub1abc... trusts npub1def... 0.82 │
-│ npub1ghi... trusts npub1jkl... 0.45 │
-│ npub1mno... distrusts npub1pqr...   │
-│                                     │
-└─────────────────────────────────────┘
-```
+- **Replacement, not accumulation.** All six kinds are addressable. Keying the store by
+  event id will accumulate superseded events and produce a roster with duplicate members
+  and inflated counts.
+- **A site event invalidates derived state.** When a 30101 arrives for a coordinate the
+  store already holds, discard that peer's cached `Δη`, `ΔF`, and p. The blob hash has
+  changed, and evidence about the old site describes something that no longer exists.
