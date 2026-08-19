@@ -261,10 +261,13 @@ attestation is a much broader statement than a group-level one.
 |--------------------|---------------------------------------------|----------------------|------------------------|
 | Marketplace browse | 30100 (all), 30101 COUNT                    | none                 | On mount + subscription|
 | Model detail       | 30100 (latest for `d`)                       | ONNX, η₀             | On mount + subscription|
+| Models by group    | 30100 (`#G` per group name)                 | none                 | On search              |
+| Models by family   | 30100 (`#F` per distribution)               | none                 | On search              |
 | Membership roster  | 30101 (latest per author for `d`)            | none                 | On mount + subscription|
 | Local trust panel  | 30102 (`#p` per peer)                        | per-site Δη, on demand| Recompute on site change|
 | Provenance (upstream)| the site's own `m` tags                     | members' Δη, to verify| On open                |
 | Provenance (downstream)| 30101 (`#p` per peer)                    | none                 | On mount + subscription|
+| Site citations     | 30101 (`#e` per event_id)                   | none                 | On open                |
 
 ---
 

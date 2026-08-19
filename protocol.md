@@ -209,6 +209,9 @@ Optional JSON with extended metadata.
     ["o", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "48192", "https://blossom.example"],
     ["g", "fc-layers", "normal", "fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"],
     ["g", "convs", "normal", "conv1.weight", "conv1.bias", "conv2.weight", "conv2.bias"],
+    ["G", "fc-layers"],
+    ["G", "convs"],
+    ["F", "normal"],
     ["x", "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b", "f64le", "196608", "https://blossom.example"],
     ["b", "https://blossom.example", "https://blossom.mirror.example"],
     ["l", "2592000"]
@@ -300,6 +303,8 @@ JSON with local training metadata. All fields optional and advisory — none of 
     ["m", "bbb2...", "e2e2e2...", "0.88,0.77"],
     ["p", "aaa1..."],
     ["p", "bbb2..."],
+    ["e", "e1e1e1..."],
+    ["e", "e2e2e2..."],
     ["x", "7d3f21a0c48b5e6f9012345678abcdef0123456789abcdef0123456789abcdef", "i8", "24576", "https://blossom.example"],
     ["E", "1786752000"]
   ],
