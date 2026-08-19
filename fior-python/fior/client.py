@@ -69,14 +69,17 @@ class Client:
             
             await ws.send(json.dumps(["REQ", "model_card", query]))
             
-            response = await ws.recv()
-            data = json.loads(response)
-            
-            if data[0] == "EOSE":
-                return None
-            
-            event = data[2]
-            return self._parse_model_card(event)
+            # Read responses until we get an EVENT or EOSE
+            while True:
+                response = await ws.recv()
+                data = json.loads(response)
+                
+                if data[0] == "EOSE":
+                    return None
+                elif data[0] == "EVENT":
+                    event = data[2]
+                    return self._parse_model_card(event)
+                # Skip AUTH and other messages
     
     async def fetch_sites(
         self,
@@ -111,11 +114,12 @@ class Client:
                 
                 if data[0] == "EOSE":
                     break
-                
-                event = data[2]
-                site = self._parse_site(event)
-                if site:
-                    sites.append(site)
+                elif data[0] == "EVENT":
+                    event = data[2]
+                    site = self._parse_site(event)
+                    if site:
+                        sites.append(site)
+                # Skip AUTH and other messages
             
             return sites
     
@@ -152,11 +156,12 @@ class Client:
                 
                 if data[0] == "EOSE":
                     break
-                
-                event = data[2]
-                att = self._parse_attestation(event)
-                if att:
-                    attestations.append(att)
+                elif data[0] == "EVENT":
+                    event = data[2]
+                    att = self._parse_attestation(event)
+                    if att:
+                        attestations.append(att)
+                # Skip AUTH and other messages
             
             return attestations
     
