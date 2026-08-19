@@ -26,6 +26,38 @@ ENCODING_I16LE = "i16le"
 ENCODING_I8 = "i8"
 
 
+# Tag constants (single-letter for relay indexing)
+# 30100 Model Card
+TAG_MODEL_ID = "d"          # Model identifier
+TAG_TITLE = "t"             # Human-readable name
+TAG_VERSION = "v"           # Model version
+TAG_SUMMARY = "s"           # Short description
+TAG_ONNX = "o"              # ONNX blob reference
+TAG_DIST = "D"              # Distribution assignment
+TAG_GROUP = "g"             # Named group
+TAG_ETA0 = "x"              # Base prior blob
+TAG_BLOSSOM = "b"           # Blossom server hints
+TAG_TTL = "l"               # Lifetime in seconds
+TAG_GROUP_SEARCH = "G"      # Cross-model group search
+TAG_FAMILY_SEARCH = "F"     # Cross-model distribution search
+
+# 30101 Site Contribution
+TAG_SITE_MODEL = "d"        # Model identifier
+TAG_SITE_COORD = "a"        # Model card coordinate
+TAG_SITE_VERSION = "v"      # Model version this site was built against
+TAG_SITE_MEMBER = "m"       # Cavity member (provenance)
+TAG_SITE_PUBKEY = "p"       # Member pubkey
+TAG_SITE_EVENT = "e"        # Event ID reference (inbound search)
+TAG_SITE_ETA = "x"          # Δη blob reference
+TAG_SITE_EXPIRATION = "E"   # NIP-40 expiration
+
+# 30102 Trust Attestation
+TAG_TRUST_TARGET = "d"      # Target scope
+TAG_TRUST_PUBKEY = "p"      # Target pubkey
+TAG_TRUST_PROB = "i"        # Inclusion probability
+TAG_TRUST_EXPIRATION = "E"  # NIP-40 expiration
+
+
 @dataclass
 class Eta:
     """Natural parameters for an exponential family distribution.

@@ -142,8 +142,14 @@ Defines a model. The `d` tag carries the model identifier.
 | `x`       | no       | Base prior `η₀` blob reference                           |
 | `b` | no       | Model-wide Blossom server hints                          |
 | `l`     | no       | Seconds after which a site without its own `E` is considered stale |
+| `G` | no       | Cross-model group name (for searchable index)            |
+| `F` | no       | Cross-model distribution family (for searchable index)   |
 
 `*` At least one `D` or `g` tag.
+
+`G` and `F` tags enable cross-model queries without knowing model_id:
+- `{kinds:[30100], "#G":["fc-layers"]}` → all models with group named "fc-layers"
+- `{kinds:[30100], "#F":["normal"]}` → all models using normal distribution
 
 If no `x` is present, `η₀` is the zero vector. Publishing an explicit proper base prior is RECOMMENDED — a zero vector means `σ² = ∞`, and every node then has to regularise privately in a way no other node can see or reproduce.
 
@@ -226,6 +232,7 @@ A node's likelihood approximation `Δη`. One per `(author, model)`; the latest 
 | `v`          | yes      | Model card version this site was built against                     |
 | `m`          | yes*     | One member of the cavity this site was fitted against               |
 | `p`          | yes*     | Member pubkey, one per `m` (indexed, enables reverse lookup)        |
+| `e`          | no       | Event ID reference (indexed, enables inbound reference search)      |
 | `x`          | yes      | `Δη` blob reference                                                |
 | `E` | no       | NIP-40 expiration; RECOMMENDED                                     |
 
@@ -236,6 +243,9 @@ A node's likelihood approximation `Δη`. One per `(author, model)`; the latest 
 `*` — required only when the cavity was not `η₀` alone. A first-round site, composed against
 the base prior with no peers, carries no `m` or `p` tags, and that absence is the claim that
 it used none.
+
+`e` tags enable searching for inbound references:
+- `{kinds:[30101], "#e":["event_id"]}` → all sites that cite this specific site
 
 ### `m` Tag Format — provenance
 
@@ -915,14 +925,17 @@ A FIOR relay advertises support in its NIP-11 document. This is the entire mecha
 | Need                          | Filter                                                       |
 |-------------------------------|--------------------------------------------------------------|
 | Browse models                 | `{kinds:[30100]}`                                            |
+| Models with group             | `{kinds:[30100], "#G":["fc-layers"]}`                        |
+| Models with distribution      | `{kinds:[30100], "#F":["normal"]}`                           |
 | All sites for a model         | `{kinds:[30101], "#d":["pump-failure-v1"]}`                  |
 | One peer's current site       | `{kinds:[30101], authors:[B], "#d":["pump-failure-v1"]}`     |
 | Sites built on B's            | `{kinds:[30101], "#p":[B]}`                                  |
+| Sites citing event X          | `{kinds:[30101], "#e":["event_id"]}`                         |
 | Attestations about B          | `{kinds:[30102], "#p":[B]}`                                  |
 
 Only single-letter tags are indexed under NIP-01, which is why event and coordinate references use `e`, `a`, and `p` rather than descriptive names.
 
-The `#p` query is the derivation graph: every site tags each member of its cavity, so asking for sites that tag B returns everyone who built on B's work. NIP-01 filters OR within a key and cannot AND across keys, so anything narrower — sites built on both B *and* C — is a fetch-by-one, filter-client-side operation.
+The `#p` query is the derivation graph: every site tags each member of its cavity, so asking for sites that tag B returns everyone who built on B's work. The `#e` query enables inbound reference search: finding all sites that cite a specific event. NIP-01 filters OR within a key and cannot AND across keys, so anything narrower — sites built on both B *and* C — is a fetch-by-one, filter-client-side operation.
 
 ---
 
