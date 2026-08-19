@@ -126,8 +126,17 @@ def create_model_card_event(
     if summary:
         tags.append(["s", summary])
     
+    # Track unique families for F tags
+    families_seen = set()
+    
     for name, family, initializers in groups:
         tags.append(["g", name, family] + initializers)
+        tags.append(["G", name])  # Cross-model group search
+        families_seen.add(family)
+    
+    # Add F tags for each unique family
+    for family in families_seen:
+        tags.append(["F", family])
     
     if eta0_blob:
         tags.append(["x", eta0_blob])
@@ -192,10 +201,11 @@ def create_site_contribution_event(
         ["x", delta_eta_blob],
     ]
     
-    # Add provenance (m tags) and member pubkeys (p tags)
+    # Add provenance (m tags), member pubkeys (p tags), and event references (e tags)
     for member_pubkey, member_event_id, p_vector in cavity_members:
         tags.append(["m", member_pubkey, member_event_id, p_vector])
         tags.append(["p", member_pubkey])
+        tags.append(["e", member_event_id])  # Inbound reference search
     
     if expiration:
         tags.append(["E", str(expiration)])
