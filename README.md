@@ -12,12 +12,16 @@ There is no aggregator and no coordinator. Every participant computes its own vi
 |----------|----------|
 | [protocol.md](protocol.md) | Wire protocol: event kinds, encoding, composition rule, trust layer |
 | [interface.md](interface.md) | Client-side API surface |
-| [architecture.md](architecture.md) | System overview, implementation status, and what the Nostr layer must implement |
+| [architecture.md](architecture.md) | System overview, implementation status, and the Nostr layer |
 | [ui-integration.md](ui-integration.md) | Mapping protocol events to marketplace UI state |
 | [distributions.md](distributions.md) | Supported exponential families and their log-partition functions |
 | [test/fior_sim.py](test/fior_sim.py) | **The reference implementation** of composition and trust — no Nostr, no Blossom. Source of every quantitative claim in `protocol.md`, and of fourteen numbered findings including the negative ones |
 
-Nothing yet implements the wire protocol; see `architecture.md` §2.
+The wire protocol is implemented in the Python library under
+[`fior-python/`](fior-python/): a full client (discovery, composition, BMR
+scoring, the Loewner confidence bound, corroboration, novelty, attestations),
+the blob codec for all families and encodings, pure-Python BIP-340 signing, a
+CLI, and an end-to-end test suite. See `architecture.md`.
 
 ## Functional Requirements
 

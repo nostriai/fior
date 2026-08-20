@@ -15,16 +15,18 @@ There is no aggregator. Nothing in the protocol requires a participant to wait o
 | UI integration guide | Markdown | `ui-integration.md` | v3 |
 | Distribution reference | Markdown | `distributions.md` | Done |
 | **Composition and trust** | **Python** | **`test/fior_sim.py`** | **v3, working — no Nostr** |
-| Nostr layer | — | — | **Not started** |
-| Blossom transport | — | — | Not started |
-| Model backend (ONNX) | — | — | Not started |
+| Python library (wire protocol + client) | Python | `fior-python/fior/` | **v3, working — tested end-to-end against a relay-like stub** |
+| CLI | Python | `fior-python/fior/cli/` | **v3, working** |
 | Marketplace UI | React | — | Not started |
 
-**Nothing implements the wire protocol.** `test/fior_sim.py` implements the parts that
-carry the design — composition, BMR scoring, `p` resolution, the confidence bound,
-corroboration, the novelty test — in process, over in-memory objects, with no events, no
-relays and no blobs. It is the reference for *what the arithmetic must do*. Everything
-between it and a running client is unbuilt, and section 2 shows the list.
+The wire protocol is implemented in the Python library: event construction and
+BIP-340 signing (pure Python, no external crypto dependency), the blob codec
+for all families and encodings, discovery, composition, the full trust layer
+(BMR unit-weight scoring, the Loewner confidence bound, corroboration, novelty,
+attestation priors), and publication.  It is exercised end-to-end by
+`fior-python/tests/` against an in-process relay and Blossom server, and the
+arithmetic is cross-checked against `test/fior_sim.py`
+(`tests/test_sim_consistency.py`).
 
 An earlier Go and Python implementation exists on the `feat/test-model` branch of the
 `forum` repository. **It implements v2 and is superseded**: v2 had a central aggregator,
@@ -104,67 +106,82 @@ published site leaks.
 
 ### What it does not implement
 
-Everything in section 2. Also: one model, one parameter group, one exponential family
+The simulation uses one model, one parameter group, one exponential family
 (Normal). So the per-group resolution of `p`, the hierarchical attestation prior's pooling
 factor `γ`, and every family in `distributions.md` other than Normal are exercised by
-nothing. `protocol.md`'s *What has been tested, and what has not* is the authoritative
+the simulation directly but not by its numbers. The Python library implements
+all of them (and `tests/test_trust.py` covers the families), but the library's
+coverage is newer than the simulation's, so
+`protocol.md`'s *What has been tested, and what has not* remains the authoritative
 list; do not assume a mechanism is validated because it is specified.
 
 ---
 
-## 2. What the Nostr layer must implement
+## 2. The Nostr layer
 
-Ordered roughly by dependency. `protocol.md` is normative for all of it; `interface.md`
-gives the client-side call surface, and its method names are used here.
+This is what the Python library (`fior-python/fior/`) implements. `protocol.md`
+is normative for all of it; `interface.md` gives the client-side call surface,
+and the library's method names match it.
 
 ### Transport and encoding
 
 - **Event construction, signing, relay I/O** for three addressable kinds — 30100, 30101,
-  30102. Kinds 30102, 30103 and 30105 were used by an earlier revision and are retired, not
-  reassigned; see *Changes from v2*.
-  Standard Nostr JSON, BIP-340 Schnorr, WebSocket. Addressable semantics are load-bearing,
+  30102. Kind numbers may be reassigned between pre-release revisions (30102 carried
+  Trust Evaluation in v2 and carries Trust Attestation in v3); 30103/30105 from an
+  intermediate revision are retired. See *Changes from v2*.
+  Standard Nostr JSON, BIP-340 Schnorr (pure-Python, `fior/bip340.py`, validated
+  against the official test vectors), WebSocket. Addressable semantics are load-bearing,
   not incidental: one event per `(kind, pubkey, d)`, latest supersedes. Keying a local
   store by event id instead of by coordinate will accumulate superseded sites and silently
   double-count members.
 - **Blossom upload and fetch**, with SHA-256 verification on fetch. Upload the blob
   *before* publishing the event that references it. An unresolvable blob is a normal state,
   not an error — the member is absent from composition and returns when the bytes resolve.
-- **Blob codec** — `f64le`, `f32le`, `i16le`, `i8`, with a header carrying per-index scales
-  for the integer forms. Quantizing encodings **must** use stochastic rounding;
-  deterministic rounding biases every consumer's composed prior in the same direction, so
-  the error accumulates across members instead of cancelling.
+- **Blob codec** — `f64le`, `f32le`, `i16le`, `i8`, with a header carrying per-block scales
+  for the integer forms (one scale per natural-parameter index block: 2 for
+  normal/mvnormal/gamma/beta, 1 for dirichlet/cat). Quantizing encodings use stochastic
+  rounding; deterministic rounding biases every consumer's composed prior in the same
+  direction, so the error accumulates across members instead of cancelling.
 - **Validation** on every fetch: decoded vector length against ONNX initializer shapes
   times the family's value count, blob SHA-256, model card `version` on every site before
-  composing it, and blob header `group_count` against the model card.
+  composing it, and blob header `group_count` against the model card. Mismatches fail
+  loudly (`fior/blob.py` raises) rather than misparsing.
 
-### Arithmetic — port from `test/fior_sim.py`
+### Arithmetic — ported from `test/fior_sim.py`
 
-- `A(η)` for every family in `distributions.md`, not just Normal. Evaluate in f64
-  regardless of the encoding a site arrived in.
+- `A(η)` for every family in `distributions.md`, not just Normal, evaluated in f64
+  regardless of the encoding a site arrived in. `tests/test_sim_consistency.py` pins the
+  library's log-partition, BMR, and full round loop to the simulation's numbers.
 - Composition, BMR `ΔF`, and `p` resolution. Four `A()` evaluations per peer per group.
 - `(a, b)` resolution from live attestations at the reader's own `κ_r`, plus the
-  hierarchical pooling across `peer` / `peer:model` / `peer:model:group` and the transitive
-  channel. The pooling factor `γ` is untested — see section 1.
+  transitive channel discounted by `p_{A→B}`. The hierarchical pooling across
+  `peer` / `peer:model` / `peer:model:group` with `γ` is specified here but its pooling
+  factor is untested in the simulation — see section 1.
 
 ### Defences — all three, and the ordering matters
 
 - The **Loewner confidence bound** is not optional. Without it a single site can dominate
-  every client's prior in the rounds before it is scored.
+  every client's prior in the rounds before it is scored. The library implements the
+  eigen-clip in the metric of the other peers for `mvnormal` groups and the elementwise
+  form for scalar `normal`.
 - **Corroboration** as one-peer-one-vote weighted median with MAD scale. Weighting votes by
-  declared precision instead is broken and measurably so.
-- The **novelty weight** needs a per-client record of when each site was **first seen**,
-  which does not exist anywhere yet. `created_at` is self-asserted and unusable. It must
-  scale `p` *after* scoring, never the contribution BMR tests, and must be skipped when the
-  member count approaches a group's ambient dimension `d + d(d+1)/2`. **It must never ship
-  without the confidence bound** — alone it makes fabrication attacks worse.
+  declared precision instead is broken and measurably so; the library never does.
+- The **novelty weight** uses the client's per-site **first-seen** order (recorded in the
+  client when sites are listed; `created_at` is self-asserted and unusable). It scales `p`
+  *after* scoring, never the contribution BMR tests, and should be skipped when the member
+  count approaches a group's ambient dimension `d + d(d+1)/2`. **It must never ship
+  without the confidence bound** — alone it makes fabrication attacks worse; the library
+  leaves it off by default.
 
 ### Model backend
 
 Bayesian linear regression with closed-form updates is what the simulation uses. Real
 models need ONNX import for arbitrary graphs, a Pyro or NumPyro backend, stochastic
 variational inference where the posterior is not analytically tractable, and local GPU
-training. `compute_site` — posterior minus the cavity it was fitted against — is the only
-part of this the protocol constrains.
+training. The library draws the boundary at `initializer_dims` (client-side ONNX shape
+extraction) and at `fit_local`/`compute_site` (posterior minus cavity). Neither ONNX
+parsing nor a training backend ships in the library — those are integration points, and
+the protocol constrains only that a site is `η_post − η_cavity`.
 
 ### What is reusable from `forum`
 

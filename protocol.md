@@ -95,12 +95,14 @@ So p adjusts **how much you believe a peer, not what you think they said**. p �
 
 The composed result must lie in the natural parameter domain of its family:
 
-| Family      | Constraint            |
-|-------------|-----------------------|
-| Normal      | `η₂ < 0`              |
-| Gamma       | `η₁ > −1`, `η₂ < 0`   |
-| Dirichlet   | `η_i > −1`            |
-| Categorical | unconstrained         |
+| Family      | Constraint                 |
+|-------------|----------------------------|
+| Normal      | `η₂ < 0`                   |
+| MVNormal    | `η₂` negative definite (Cholesky factor exists) |
+| Gamma       | `η₁ > −1`, `η₂ < 0`        |
+| Beta        | `η₁ > −1`, `η₂ > −1`       |
+| Dirichlet   | `η_i > −1`                 |
+| Categorical | unconstrained              |
 
 Sites carry *differences*, so a `Δη` may lower precision and a weighted sum of valid sites need not be valid. A client MUST check the constraint before using a composed group and MUST NOT proceed with one that violates it. **This document specifies no remedy**, because none has been tested; see *What has been tested, and what has not*.
 
@@ -120,7 +122,7 @@ There is no registration kind. Publishing a site **is** joining; a NIP-09 deleti
 
 There is no round counter. Ordering is `created_at`, and provenance is the member list each site carries.
 
-Three kinds. Kinds are specified below in the order 30100, 30101, then 30102; the Trust Attestation is documented after the [Trust Layer](#trust-layer), because its `i` tag is meaningless without it. Kind numbers 30102, 30103 and 30105 were used by earlier revisions and are **retired, not reassigned** — see *Changes from v2*.
+Three kinds. Kinds are specified below in the order 30100, 30101, then 30102; the Trust Attestation is documented after the [Trust Layer](#trust-layer), because its `i` tag is meaningless without it. The protocol is pre-release, so a kind number may be reassigned between revisions: 30102 carried Trust Evaluation in v2 and carries Trust Attestation in v3. The benchmark kinds 30103 and 30105 from an intermediate revision are retired, and no event kind other than these three is defined -- see *Changes from v2*.
 
 ---
 
@@ -178,7 +180,7 @@ The blob is addressed by SHA-256 per Blossom BUD-01: fetch from `<server-root>/<
 | Field       | Type   | Description                                                     |
 |-------------|--------|-----------------------------------------------------------------|
 | `init_name` | string | ONNX initializer tensor name (e.g. `fc1.weight`)                |
-| `family`    | string | `normal`, `gamma`, `dirichlet`, `cat`, `beta`                   |
+| `family`    | string | `normal`, `mvnormal`, `gamma`, `dirichlet`, `cat`, `beta`        |
 
 ### `g` Tag Format
 
@@ -350,32 +352,35 @@ Raw binary is half the size of v2's hex encoding and 25% smaller than base64 wou
 ```
 header   u16le  group_count
          per group, in model card order:
-           u8     scale_count      (0 for float encodings)
+           u32le  scale_count      (0 for float encodings)
            f64le  scale × scale_count
 body     groups concatenated in model card order
 ```
 
-Each group's value count derives from its ONNX initializer shapes times its family's value multiplier, so no lengths are transmitted. `group_count` MUST match the model card at the version the event declares, which makes a stale or reordered model card fail loudly rather than silently misparse.
+Each group's value count derives from its ONNX initializer shapes times its family's value multiplier, so no lengths are transmitted. `group_count` MUST match the model card at the version the event declares, which makes a stale or reordered model card fail loudly rather than silently misparse. A decoder MUST also fail loudly on any group whose body is shorter than the value count its model card declared — a truncated or mismatched blob is an error, never a silent parse of whatever bytes remain.
 
 ### Natural parameter layout per family
 
 For a group with `d` scalar parameters:
 
-| Family      | Values | Layout                                                        |
-|-------------|--------|---------------------------------------------------------------|
-| `normal`    | `2d`   | first `d`: `η₁ᵢ = μᵢ/σᵢ²`; last `d`: `η₂ᵢ = −1/(2σᵢ²)`         |
-| `gamma`     | `2d`   | first `d`: `η₁ᵢ = αᵢ − 1`; last `d`: `η₂ᵢ = −pᵢ`               |
-| `beta`      | `2d`   | first `d`: `η₁ᵢ = aᵢ − 1`; last `d`: `η₂ᵢ = bᵢ − 1`            |
-| `dirichlet` | `k`    | `ηᵢ = αᵢ − 1`                                                  |
-| `cat`       | `k`    | `ηᵢ = log P(category i)`                                       |
+| Family      | Values            | Layout                                                        |
+|-------------|-------------------|---------------------------------------------------------------|
+| `normal`    | `2d`              | first `d`: `η₁ᵢ = μᵢ/σᵢ²`; last `d`: `η₂ᵢ = −1/(2σᵢ²)`         |
+| `mvnormal`  | `d + d(d+1)/2`    | first `d`: `η₁ᵢ` (mean vector of the multivariate Normal); last `d(d+1)/2`: lower triangle of the symmetric `η₂` matrix, row-major |
+| `gamma`     | `2d`              | first `d`: `η₁ᵢ = αᵢ − 1`; last `d`: `η₂ᵢ = −pᵢ`               |
+| `beta`      | `2d`              | first `d`: `η₁ᵢ = aᵢ − 1`; last `d`: `η₂ᵢ = bᵢ − 1`            |
+| `dirichlet` | `k`               | `ηᵢ = αᵢ − 1`                                                  |
+| `cat`       | `k`               | `ηᵢ = log P(category i)`                                       |
+
+`mvnormal` is the full-covariance multivariate Normal, whose `d` scalar parameters form one vector and one symmetric precision matrix that couples them. It is the form the trust layer's directional machinery — the Loewner cap, eigenbasis corroboration, and the span test — is defined for. `normal` is the independence special case (`d` scalar Normals sharing no off-diagonal precision), kept because it is what a large tensor group uses in practice; it is the diagonal of `mvnormal`. The value multiplier (from `d` into values) is therefore 2 for `normal`, `d + d(d+1)/2` for `mvnormal`, 2 for `gamma` and `beta`, and 1 for `dirichlet` and `cat`.
 
 For a site, these are *differences* `Δη`, not posteriors.
 
 ### Quantization
 
-Integer encodings carry one scale per natural-parameter index of the family — two for `normal`, `gamma`, and `beta`; one for `dirichlet` and `cat`. Dequantization is `value = scale × q`.
+Integer encodings carry one scale per natural-parameter **index block** of the group — two for `normal`, `mvnormal`, `gamma`, and `beta` (one for the mean block, one for the precision block), and one for `dirichlet` and `cat`. Dequantization is `value = scale × q`, per block. For `mvnormal` the precision block's single scale covers the packed matrix; a publisher that needs sharper precision on some matrix entries should prefer a wider encoding for that group. `scale_count` is transmitted per group and MUST equal the block count (2 or 1) — a decoder rejects anything else.
 
-Per-index scaling is required, not cosmetic: `η₂ = −1/(2σ²)` spans orders of magnitude between a sharply determined parameter and a barely identified one, and a single global scale cannot cover both natural-parameter indices at once.
+Per-block scaling is required, not cosmetic: `η₂ = −1/(2σ²)` spans orders of magnitude between a sharply determined parameter and a barely identified one, and a single global scale cannot cover both natural-parameter indices at once.
 
 **Publishers MUST use stochastic rounding when quantizing.** Federated summation is unusually quantization-tolerant — with N members, independent zero-mean errors add in quadrature (~√N) while the signal grows ~N, so relative error in the composed prior falls as 1/√N. That property depends entirely on unbiasedness. Deterministic round-to-nearest is biased, and bias accumulates linearly alongside the signal rather than cancelling.
 
@@ -470,7 +475,7 @@ Scoring a peer against the base prior alone — without the other peers present 
 
 BMR asks whether a peer helps. It never asks how sure that peer is entitled to be, and nothing else in this document bounds it either: a site may claim arbitrary precision at no cost, and `Δη` carries no evidence of the data behind it.
 
-This is exploitable, and the exploit does not require ever being trusted. Every site publishes its precision block, which for a Normal group *is* the publisher's observed subspace — so an attacker can read off, from public data, which directions the federation constrains least. A site that agrees with the consensus everywhere else and plants one confident falsehood along such a direction is close to optimal against this scoring rule: along a direction the evaluator has no data about, moving the mean costs the evaluator no evidence while the added precision raises it.
+This is exploitable, and the exploit does not require ever being trusted. Every site publishes its precision block, which for an `mvnormal` group *is* the publisher's observed subspace — so an attacker can read off, from public data, which directions the federation constrains least. A site that agrees with the consensus everywhere else and plants one confident falsehood along such a direction is close to optimal against this scoring rule: along a direction the evaluator has no data about, moving the mean costs the evaluator no evidence while the added precision raises it.
 
 The damage arrives through **transient trust**. `p⁽⁰⁾ = β = a/(a+b)` is `1/2` for a stranger, so before it can be rejected the attacker sits in every client's prior at half weight and, at sufficient claimed precision, dominates it. Every `ΔF` computed in those rounds — including each honest peer's judgement of every *other* honest peer — is measured against a corrupted prior, and because `p = σ(ΔF)` with `ΔF` in the hundreds of nats, those judgements saturate. The attacker is then correctly rejected and the corrupted judgements about everyone else remain. In [test/fior_sim.py](test/fior_sim.py) this costs **a mean of 44 nats per held-out test point over 8 seeds, with a median of 12 and a worst case of 181** — the damage is severe but wildly variable, and any single figure for it is misleading. Meanwhile the attacker ends at `p = 0.012`, trusted by 0.08 of 16 nodes; pinning its p to zero from round 0 reproduces the attacker-free run exactly, which isolates transient trust as the whole of the effect.
 
@@ -480,7 +485,7 @@ There is a second, sharper observation. The victim's own free energy is about 10
 
 Two natural defences do not work, and are recorded so they are not re-attempted. Setting `p⁽⁰⁾ = 0` only delays exposure by one round, because a stranger scored against `η₀` alone scores positively (see above) and is admitted at high weight immediately after. Capping `trace(Λ)` does not see a rank-one spike: such a site's trace sits well inside any cap loose enough to admit honest nodes.
 
-What works is a bound in the same shape as the attack. Because the falsehood is directional, the constraint must be directional. For a Normal group, writing `Λ = −2η₂`, clients SHOULD bound each peer against what their *other* peers supply:
+What works is a bound in the same shape as the attack. Because the falsehood is directional, the constraint must be directional. For an `mvnormal` group, writing `Λ = −2η₂`, clients SHOULD bound each peer against what their *other* peers supply:
 
 ```
 Λ_n  ⪯  c · Λ_others          (Loewner order)
@@ -493,7 +498,7 @@ This is a client-side policy, like every other part of p. It changes no wire for
 
 **It is much weaker against a coalition.** When several peers push the same direction together, the coalition *is* the other peers there and so inflates its own budget. Over 8 seeds the cap reduces a coalition's excess from a mean of 10.4 nats per test point to 6.1, against the 44 → 1.4 it achieves on a lone attacker. The cap is necessary and not sufficient; see *Corroboration between sites*.
 
-For families whose natural parameters carry no matrix precision block, no analogue is specified here.
+For families whose natural parameters carry no matrix precision block, no analogue is specified here. A scalar `normal` group is the diagonal special case: the same bound applies elementwise, which discards the directionality that makes the cap work, so a card that wants an attacking site's confident falsehood bounded *along a direction* must assign that parameter vector to an `mvnormal` group.
 
 ### The invariant
 
@@ -793,7 +798,7 @@ Worth noting for calibration that blending is already the weaker attack — a bl
 
 **Apply it as a weight, not as a substitution.** It is tempting to compose with residuals in place of sites, which would make composition rank-correct and eliminate double counting outright. Do not: the orthogonal projection of a positive semi-definite precision block is not in general positive semi-definite, so the result need not be a valid site. Clients SHOULD instead scale a peer's p by its residual — treating `r_n` as the fraction of that peer's claim that is its own — which changes no wire format and stays inside the existing client-side-policy boundary.
 
-**Where it stops working.** The test has power only while the parameter space is large relative to the number of publishers. Honest sites are linearly independent by accident of having different data, and that accident runs out. Measured on a clean network of sixteen honest nodes with no free-riders at all, the minimum honest residual falls as the ambient dimension of a site — `d + d(d+1)/2` for a Normal group — approaches the number of peers:
+**Where it stops working.** The test has power only while the parameter space is large relative to the number of publishers. Honest sites are linearly independent by accident of having different data, and that accident runs out. Measured on a clean network of sixteen honest nodes with no free-riders at all, the minimum honest residual falls as the ambient dimension of a site — `d + d(d+1)/2` for an `mvnormal` group, `2d` for scalar `normal` — approaches the number of peers:
 
 | `d` | ambient dimension | min honest residual, causal | same, symmetric |
 |---|---|---|---|
@@ -991,7 +996,7 @@ A large body of work reconstructs training data from shared gradients ([Deep Lea
 
 **Conjugate models: exact, and no attack is required.** Where the likelihood is conjugate to the family — linear-Gaussian regression being the case this document's simulation uses — a site contribution `Δη` *is* the sufficient statistic of the publisher's data. That is precisely what makes the composition rule a sum. The statistics are therefore published directly rather than inferred, and everything below follows by algebra rather than by optimisation.
 
-For a Normal group with known noise precision `τ`, the site is exactly `Λ = τ·XᵀX` and `η₁ = τ·Xᵀy`. Consequently:
+For an `mvnormal` group with known noise precision `τ`, the site is exactly `Λ = τ·XᵀX` and `η₁ = τ·Xᵀy`. Consequently:
 
 - **`XᵀX` is recovered exactly** by any reader who knows `τ`, which the model card publishes. Every feature variance and every pairwise feature correlation in the publisher's sample is public.
 - **The observations themselves are determined up to an `n × n` orthogonal mixing of the publisher's own rows**, where `n` is the number of local observations. That mixing is not published, so for large `n` individual records are not identified.
@@ -1029,8 +1034,11 @@ Three kinds remain: 30100, 30101, 30102.
 An intermediate revision of v3 specified three further kinds — **30102 Composite**, a
 reproducible weighted combination; **30103 Benchmark Result**, a measurement of a site or
 composite; and **30105 Benchmark Descriptor**, defining what made results comparable. All
-three are gone. **The numbers are retired, not reassigned**, so a client encountering them
-on a relay is seeing an obsolete revision, never a different meaning.
+three are gone. Because the protocol is pre-release, kind numbers may be reused: 30102 was
+reassigned to Trust Attestation, while 30103 and 30105 are retired. Since every FIOR event
+includes a `d` tag and a versioned model reference, no event that was valid under the
+intermediate revision can be mistaken for an event of the same meaning today — the kinds
+are simply different now.
 
 The reasoning is that a benchmark cannot be both verifiable and informative here:
 

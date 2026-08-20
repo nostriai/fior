@@ -23,18 +23,17 @@ published by the aggregator. Neither exists in v3:
 
 **Data extracted from 30100 tags:**
 
-| Tag       | Maps to                                 |
-|-----------|-----------------------------------------|
-| `d`       | `model.id`                              |
-| `title`   | `model.displayName`                     |
-| `summary` | `model.description`                     |
-| `version` | `model.version`                         |
-| `onnx`    | `model.onnx = {hash, bytes, servers}`   |
-| `dist`    | `model.parameterGroups[].name`          |
-| `group`   | `model.parameterGroups[].name`          |
-| `x`       | `model.basePrior = {hash, enc, bytes}`  |
-| `blossom` | `model.blossomServers[]`                |
-| `ttl`     | `model.siteTtlSeconds`                  |
+| Tag      | Maps to                                 |
+|----------|-----------------------------------------|
+| `d`      | `model.id`                              |
+| `t`      | `model.displayName`                     |
+| `s`      | `model.description`                     |
+| `v`      | `model.version`                         |
+| `o`      | `model.onnx = {hash, enc, bytes, servers}` |
+| `D`/`g`  | `model.parameterGroups[].name`          |
+| `x`      | `model.basePrior = {hash, enc, bytes}`  |
+| `b`      | `model.blossomServers[]`                |
+| `l`      | `model.siteTtlSeconds`                  |
 
 **Computed:**
 
@@ -223,7 +222,7 @@ per-evaluator and never published as a total.
 **Query:** `{kinds:[30102], "#p":[peerPubkey]}` — who has attested about this peer.
 
 ```
-attestation.p      = <scalar in (0,1)>   // the attester's POSTERIOR p, from `incl`
+attestation.p      = <scalar in (0,1)>   // the attester's POSTERIOR p, from `i`
 attestation.scope  = "peer" | "peer:model" | "peer:model:group"
 ```
 
@@ -290,7 +289,7 @@ const sub = relay.subscribe([
 
 Two subscription behaviours that differ from v2:
 
-- **Replacement, not accumulation.** All six kinds are addressable. Keying the store by
+- **Replacement, not accumulation.** All three kinds are addressable. Keying the store by
   event id will accumulate superseded events and produce a roster with duplicate members
   and inflated counts.
 - **A site event invalidates derived state.** When a 30101 arrives for a coordinate the

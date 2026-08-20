@@ -1,7 +1,9 @@
 Interface: FederatedInferenceOverRelays
 
 All methods run client-side. Composition and trust are computed locally from events any relay can serve. See
-[protocol.md](protocol.md) for the wire format.
+[protocol.md](protocol.md) for the wire format. The Python library
+(`fior-python/fior/client.py`) implements every method below; the signatures in
+that module are the executable form of this document.
 
 `signer` denotes a signing capability (NIP-07 handle, hardware signer, or an in-process
 key). Private keys are never passed between components.
@@ -102,9 +104,9 @@ Two quantities, `β` and `p`, and this document keeps them apart:
           the caller and this peer.
         - c - Bound on how much more confident one peer may be than the rest combined.
     - Output: `Δη` with its precision bounded, implied mean unchanged.
-    - Behavior: For Normal groups, clips the eigenvalues of the peer's precision in the
+    - Behavior: For `mvnormal` groups, clips the eigenvalues of the peer's precision in the
       metric of `others` so that `Λ_n ⪯ c·Λ_others`, and rescales `η₁` to preserve the
-      implied mean. Bounds the influence a site can exert during the rounds before it is
+      implied mean. For scalar `normal` groups the same bound applies elementwise. Bounds the influence a site can exert during the rounds before it is
       scored, which is not otherwise bounded by anything: `score_peers` asks whether a
       peer helps, never how sure it may be. Excluding the peer from `others` is required —
       a site that counts toward its own bound is not bounded. Local policy; changes no
@@ -128,7 +130,7 @@ Two quantities, `β` and `p`, and this document keeps them apart:
       copier. Callers SHOULD scale `p` by this value rather than substituting the residual
       for the site: the projection of a positive semi-definite precision block need not be
       positive semi-definite. Callers MUST skip the test when the member count approaches
-      a group's ambient dimension (`d + d(d+1)/2` for a Normal group), where honest sites
+      a group's ambient dimension (`d + d(d+1)/2` for an `mvnormal` group, `2d` for scalar `normal`), where honest sites
       become linearly dependent by accident and every peer scores zero.
     - Warning: callers MUST NOT apply this without also applying `bound_confidence`.
       Measured, it makes confidence-fabrication attacks substantially worse on its own,
