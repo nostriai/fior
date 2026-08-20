@@ -1,51 +1,55 @@
-"""Basic usage example for FIOR Python library."""
+"""FIOR Python library - basic usage.
 
-import asyncio
+This example walks the whole loop: read a model card, list sites, fetch each
+site's delta-eta blob, compose a prior, and score peers against a local
+likelihood.  It assumes a relay and Blossom server are configured; the exact
+same flow is what the CLI's `fetch`, `compose`, and `score` commands run.
+"""
+
 import numpy as np
-from fior import Client, Eta, Site, ModelCard, Group
+
+from fior import Client, Eta, Site
+
+RELAY = "wss://relay.example.com"
+BLOSSOM = ["https://blossom.example.com"]
+MODEL = "pump-failure-v1"
+# dims would normally come from parsing the ONNX graph client-side.
+INITIALIZER_DIMS = {"fc1.weight": 256, "fc1.bias": 256}
 
 
-async def main():
-    """Example: fetch model, sites, compose prior."""
-    
-    # Create client
-    client = Client(
-        relay_url="wss://relay.example.com",
-        blossom_servers=["https://blossom.example.com"],
-    )
-    
-    # Fetch a model card
-    model = await client.fetch_model_card("pump-failure-v1")
-    if model:
-        print(f"Model: {model.title} (v{model.version})")
-        print(f"Groups: {[g.name for g in model.groups]}")
-    
-    # Fetch sites for the model
-    sites = await client.fetch_sites("pump-failure-v1")
-    print(f"Found {len(sites)} sites")
-    
-    # Compose prior from trusted peers
-    if sites and model:
-        # Simple trust: full weight for first site
-        p_values = [0.9] + [0.5] * (len(sites) - 1)
-        prior = client.compose_prior(model.eta0, sites, p_values)
-        print(f"Composed prior: dim={prior.dim}")
-    
-    # Compute p for a peer
-    if sites:
-        site = sites[0]
-        
-        # Build cavity (prior without this site)
-        other_sites = sites[1:]
-        cavity = client.compose_prior(model.eta0, other_sites, [0.5] * len(other_sites))
-        
-        # Local data contribution (placeholder)
-        local_likelihood = Eta(h=np.array([0.1]), Lam=np.array([-0.1]))
-        
-        # Compute p
-        p = client.compute_p(site, cavity, local_likelihood, beta=0.5)
-        print(f"Computed p for {site.author[:8]}...: {p:.3f}")
+def main():
+    c = Client(relay_url=RELAY, blossom_servers=BLOSSOM, private_key="<your-hex-key>")
+
+    card = c.read_model_card(MODEL, initializer_dims=INITIALIZER_DIMS)
+    if card is None:
+        print("no model card found")
+        return
+    print(f"Model: {card.title} (v{card.version}), groups: "
+          f"{[(g.name, g.family, g.dim) for g in card.groups]}")
+
+    descs = c.list_sites(MODEL)
+    members = []
+    for d in descs:
+        delta = c.fetch_site_params(d, MODEL)
+        if delta:
+            members.append(Site(author=d.author, model_id=MODEL,
+                                model_version=d.model_version, delta_eta=delta,
+                                event_id=d.event_id))
+    print(f"{len(members)} sites resolved")
+
+    # trust table: currently held p values (defaults to 0.5 for strangers)
+    p_table = {d.author: {g.name: c.trust.get_p(d.author, g.name) for g in card.groups}
+               for d in descs}
+    prior = c.compose_prior(card, members, p_table)
+    print("composed prior groups:", {g: e.implied_mean() for g, e in prior.items()})
+
+    # local likelihood: whatever the local fit produced (posterior - prior)
+    lik = Eta("mvnormal", np.array([0.1, -0.2]), np.array([[-0.5, 0.0], [0.0, -0.5]]))
+    posterior = {g: prior[g] + lik for g in prior}
+    new_p = c.score_peers(card, prior, posterior, members, p_table)
+    print("scored peers:", {a: {g: round(v, 4) for g, v in gr.items()}
+                            for a, gr in new_p.items()})
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

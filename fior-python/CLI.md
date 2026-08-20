@@ -1,286 +1,129 @@
 # FIOR CLI
 
-Command-line interface for interacting with the FIOR protocol.
+Command-line interface for the FIOR protocol, backed by `fior.client`. Every
+command talks to a real relay and Blossom server; there are no placeholders.
 
-## Table of Contents
+## Install
 
-1. [Installation](#installation)
-2. [Quick Start](#quick-start)
-3. [Commands](#commands)
-   - [config](#config)
-   - [fetch](#fetch)
-   - [compose](#compose)
-   - [score](#score)
-   - [publish](#publish)
-   - [blob](#blob)
-   - [trust](#trust)
-4. [Examples](#examples)
-5. [Configuration](#configuration)
-6. [Troubleshooting](#troubleshooting)
-
----
-
-## Installation
-
-### From PyPI
-
-```bash
-pip install fior
+```sh
+pip install .            # from fior-python/, or `pip install fior` once published
+fior --help
 ```
 
-### From source
+Requires Python 3.10+. The `fior` console script and `python -m fior.cli.main`
+are equivalent entry points.
 
-```bash
-git clone https://github.com/nostriai/fior.git
-cd fior/fior-python
-pip install -e .
-```
+## Configuration
 
-### Standalone binary
+Config file: `~/.config/fior/config.toml` (managed by the CLI itself).
 
-Download from releases and make executable:
-
-```bash
-chmod +x fior
-./fior --help
-```
-
----
-
-## Quick Start
-
-```bash
-# Initialize config
+```sh
 fior config init
-
-# Edit config to add your private key
-nano ~/.config/fior/config.toml
-
-# Fetch a model
-fior fetch model pump-failure-v1
-
-# List trust table
-fior trust list
+fior config set relay.url wss://relay.example.com
+fior config set blossom.server https://blossom.example.com
+fior config set identity.private_key <hex secret key>
+fior config set trust.kappa_r 4
+fior config show --json
 ```
 
----
+`kappa_r` is the reader-side attestation weight; the protocol recommends 1..4.
+The private key lives only in this file and signs everything you publish.
 
 ## Commands
 
-### config
-
-Manage FIOR configuration.
-
-```bash
-# Initialize config file
-fior config init
-
-# Show current config
-fior config show
-
-# Set config value
-fior config set relay.url wss://nos.lol
-fior config set blossom.server https://blossom.example.com
-```
-
 ### fetch
 
-Fetch data from relay.
-
-```bash
-# Fetch model card
-fior fetch model <model_id> [--relay <url>] [--json]
-
-# Fetch sites for a model
-fior fetch sites <model_id> [--relay <url>] [--json]
-
-# Fetch attestations for a peer
-fior fetch attestations <pubkey> [--relay <url>] [--json]
+```sh
+fior fetch model <model-id> [--relay URL] [--json]
+fior fetch sites <model-id> [--relay URL] [--json]
+fior fetch attestations <pubkey> [--relay URL] [--json]
 ```
+
+`fetch model` prints the parsed model card (groups, families, dims). `fetch
+sites` lists the current site descriptors (one per author), no parameter
+bytes. `fetch attestations` lists live attestations about a peer.
 
 ### compose
 
-Compose prior from trusted peers.
-
-```bash
-# Compose with default peers
-fior compose <model_id> [--relay <url>] [--json]
-
-# Compose with specific peers
-fior compose <model_id> --peers <pubkey1,pubkey2,...> [--relay <url>] [--json]
+```sh
+fior compose <model-id> [--relay URL] [--json]
 ```
+
+Fetches the model card, its sites, and each site's Δη blob, then builds the
+local prior `η0 + Σ p·Δη` from the current trust table. Raises (exit 1) if a
+composed group leaves its natural parameter domain.
 
 ### score
 
-Score peers using BMR.
-
-```bash
-# Score all peers
-fior score <model_id> [--relay <url>] [--json]
-
-# Score specific peer
-fior score <model_id> --peer <pubkey> [--relay <url>] [--json]
+```sh
+fior score <model-id> --likelihood lik.json [--rounds N] [--relay URL] [--json]
 ```
+
+Scores every peer per group with BMR at unit weight. `lik.json` is the caller's
+local likelihood contribution per group, e.g.:
+
+```json
+{
+  "coefs": {"h": [0.1, -0.2], "lam": [[-0.5, 0.0], [0.0, -0.5]]}
+}
+```
+
+`--rounds` repeats the fixed-point iteration. Results are stored in the local
+trust table (`~/.config/fior/trust.json`).
 
 ### publish
 
-Publish site or attestation.
-
-```bash
-# Publish site contribution
-fior publish site <model_id> --data <blob_path> [--relay <url>] [--json]
-
-# Publish trust attestation
-fior publish attestation <target_pubkey> --p <value> [--relay <url>] [--json]
+```sh
+fior publish model <spec.json>               # model card
+fior publish site --model <id> --delta delta.json \
+      [--members members.json] [--encoding i8|i16le|f32le|f64le] [--relay URL]
+fior publish attestation --peer <pubkey> --p 0.8 \
+      [--model <id>] [--group <group>] [--relay URL]
 ```
+
+- `publish model`: `spec.json` is `{id, title, version, groups:
+  [{name, family, initials, dim}], onnx: {sha, size, servers},
+  blossom_servers}`.
+- `publish site`: `delta.json` holds one `{h, lam}` per model group. The blob
+  is uploaded to the configured Blossom server(s) **before** the event is
+  published, exactly as the protocol requires.
+- `publish attestation`: one scalar `p` in (0,1).
 
 ### blob
 
-Manage Blossom blobs.
-
-```bash
-# Upload blob
-fior blob upload <file> --server <blossom_url> [--json]
-
-# Fetch blob
-fior blob fetch <sha256> --server <blossom_url> [--output <path>] [--json]
+```sh
+fior blob upload <file> [--server URL] [--json]
+fior blob fetch <sha256> [--server URL] [-o out.bin]
 ```
 
 ### trust
 
-Manage trust table.
-
-```bash
-# List trust entries
-fior trust list [--model <model_id>] [--json]
-
-# Set trust value
-fior trust set <pubkey> <group> <p_value>
-
-# Reset trust values
-fior trust reset [<pubkey>] [--group <group>]
+```sh
+fior trust list [--json]
+fior trust set <peer> <group> <p>
+fior trust reset [<peer>] [--group <group>]
 ```
 
----
+The trust table is stored at `~/.config/fior/trust.json`.
 
-## Examples
+### withdraw
 
-### Fetch and display model
-
-```bash
-$ fior fetch model pump-failure-v1
-
-┌─────────────────────────────────────┐
-│ Model: pump-failure-v1              │
-│ Title: Pump Failure Predictor       │
-│ Version: 3                          │
-│ Groups: fc-layers, convs            │
-└─────────────────────────────────────┘
+```sh
+fior withdraw <model-id> [--relay URL]
 ```
 
-### JSON output for scripting
+Publishes a NIP-09 deletion for your site on the model.
 
-```bash
-$ fior fetch model pump-failure-v1 --json
-{
-  "id": "pump-failure-v1",
-  "title": "Pump Failure Predictor",
-  "version": 3,
-  "groups": ["fc-layers", "convs"]
-}
-```
+## Output
 
-### Trust table
-
-```bash
-$ fior trust list
-
-┌────────────────┬───────────┬───────┐
-│ Peer           │ Group     │ p     │
-├────────────────┼───────────┼───────┤
-│ abc123...      │ fc-layers │ 0.92  │
-│ def456...      │ convs     │ 0.75  │
-└────────────────┴───────────┴───────┘
-```
-
----
-
-## Configuration
-
-Config file location: `~/.config/fior/config.toml`
-
-```toml
-# FIOR Configuration
-
-[relay]
-url = "wss://relay.example.com"
-
-[blossom]
-server = "https://blossom.example.com"
-
-[identity]
-# private_key = "your_private_key_hex_here"
-
-[trust]
-kappa_r = "4"
-```
-
-### Key Management
-
-- NIP-07 doesn't apply to CLI
-- Generate key elsewhere (e.g., `nsec` tool)
-- Place private key in config file
-- CLI signs events using this key
-
----
+Human-readable by default; `--json` on every command emits machine-readable
+JSON; `--no-color` disables rich styling.
 
 ## Troubleshooting
 
-### Config not found
-
-```bash
-fior config init
-```
-
-### Connection errors
-
-Check relay URL in config:
-
-```bash
-fior config set relay.url wss://nos.lol
-```
-
-### Permission errors
-
-Ensure config directory exists:
-
-```bash
-mkdir -p ~/.config/fior
-```
-
----
-
-## Output Formats
-
-### Human-readable (default)
-
-Pretty printed tables with colors.
-
-### Machine-readable (--json)
-
-JSON output for scripting and automation.
-
-### Plain output (--no-color)
-
-Disable colors for piping or logging.
-
----
-
-## Dependencies
-
-- typer - CLI framework
-- rich - Pretty printing
-- tomli - TOML config parsing
-- noble-secp256k1 - Cryptographic signing
-- requests - HTTP client
-- websockets - WebSocket client
+- "no Blossom server configured": set one with `fior config set blossom.server
+  URL` or pass `--server`.
+- "read the model card first": load the card with `fetch model` / `compose`
+  before operating on sites, or pass `initializer_dims` in code.
+- "composed group ... left its natural parameter domain": the protocol defines
+  no recovery; drop a member or refetch at a wider encoding.

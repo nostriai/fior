@@ -4,24 +4,38 @@ FIOR - Federated Inference Over Relays
 A Nostr protocol for collaborative machine learning without sharing raw data.
 """
 
+from . import bip340
 from .types import (
-    Eta, Site, ModelCard, Group, Attestation,
-    KIND_MODEL_CARD, KIND_SITE_CONTRIBUTION, KIND_TRUST_ATTESTATION,
-    FAMILY_NORMAL, FAMILY_GAMMA, FAMILY_BETA, FAMILY_DIRICHLET, FAMILY_CATEGORICAL,
-    ENCODING_F64LE, ENCODING_F32LE, ENCODING_I16LE, ENCODING_I8,
-    TAG_MODEL_ID, TAG_TITLE, TAG_VERSION, TAG_SUMMARY, TAG_ONNX, TAG_DIST, TAG_GROUP,
-    TAG_ETA0, TAG_BLOSSOM, TAG_TTL, TAG_GROUP_SEARCH, TAG_FAMILY_SEARCH,
-    TAG_SITE_MODEL, TAG_SITE_COORD, TAG_SITE_VERSION, TAG_SITE_MEMBER, TAG_SITE_PUBKEY,
-    TAG_SITE_EVENT, TAG_SITE_ETA, TAG_SITE_EXPIRATION,
-    TAG_TRUST_TARGET, TAG_TRUST_PUBKEY, TAG_TRUST_PROB, TAG_TRUST_EXPIRATION,
+    Eta,
+    Site,
+    ModelCard,
+    Group,
+    Attestation,
+    CavityMember,
+    SiteDescriptor,
+    KIND_MODEL_CARD,
+    KIND_SITE_CONTRIBUTION,
+    KIND_TRUST_ATTESTATION,
+    FAMILY_NORMAL,
+    FAMILY_MVNORMAL,
+    FAMILY_GAMMA,
+    FAMILY_BETA,
+    FAMILY_DIRICHLET,
+    FAMILY_CATEGORICAL,
+    ONE_BLOCK_FAMILIES,
+    ENCODING_F64LE,
+    ENCODING_F32LE,
+    ENCODING_I16LE,
+    ENCODING_I8,
+    value_count,
 )
-from .math import log_partition, compose_prior, bmr_delta_f, p_from
-from .trust import TrustTable, Corroboration
+from .math import log_partition, compose_prior, bmr_delta_f, p_from, logistic
+from .trust import TrustTable, Corroboration, loewner_clip, novelty_weight, causal_span_residual
 from .nostr import Event, sign_event, publish_event
-from .blob import upload_blob, fetch_blob
-from .client import Client
+from .blob import upload_blob, fetch_blob, encode_eta_blob, decode_eta_blob
+from .client import Client, ClientError, DomainError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Eta",
@@ -29,10 +43,16 @@ __all__ = [
     "ModelCard",
     "Group",
     "Attestation",
+    "CavityMember",
+    "SiteDescriptor",
+    "Client",
+    "ClientError",
+    "DomainError",
     "KIND_MODEL_CARD",
     "KIND_SITE_CONTRIBUTION",
     "KIND_TRUST_ATTESTATION",
     "FAMILY_NORMAL",
+    "FAMILY_MVNORMAL",
     "FAMILY_GAMMA",
     "FAMILY_BETA",
     "FAMILY_DIRICHLET",
@@ -41,40 +61,22 @@ __all__ = [
     "ENCODING_F32LE",
     "ENCODING_I16LE",
     "ENCODING_I8",
-    "TAG_MODEL_ID",
-    "TAG_TITLE",
-    "TAG_VERSION",
-    "TAG_SUMMARY",
-    "TAG_ONNX",
-    "TAG_DIST",
-    "TAG_GROUP",
-    "TAG_ETA0",
-    "TAG_BLOSSOM",
-    "TAG_TTL",
-    "TAG_GROUP_SEARCH",
-    "TAG_FAMILY_SEARCH",
-    "TAG_SITE_MODEL",
-    "TAG_SITE_COORD",
-    "TAG_SITE_VERSION",
-    "TAG_SITE_MEMBER",
-    "TAG_SITE_PUBKEY",
-    "TAG_SITE_EVENT",
-    "TAG_SITE_ETA",
-    "TAG_SITE_EXPIRATION",
-    "TAG_TRUST_TARGET",
-    "TAG_TRUST_PUBKEY",
-    "TAG_TRUST_PROB",
-    "TAG_TRUST_EXPIRATION",
+    "value_count",
     "log_partition",
     "compose_prior",
     "bmr_delta_f",
     "p_from",
+    "logistic",
     "TrustTable",
     "Corroboration",
+    "loewner_clip",
+    "novelty_weight",
+    "causal_span_residual",
     "Event",
     "sign_event",
     "publish_event",
     "upload_blob",
     "fetch_blob",
-    "Client",
+    "encode_eta_blob",
+    "decode_eta_blob",
 ]
